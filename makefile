@@ -1,4 +1,4 @@
-jsonInclude := /data/others/ciarchi/PolymerDyn/
+jsonInclude := /data/others/ciarchi/PolymerDyn/CudaPoly
 OptFlag := -O3
 CudaCC := nvcc
 objects := polydyn.o polydynOpt.o
