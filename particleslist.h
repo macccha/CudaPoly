@@ -4,7 +4,6 @@
 #include <thrust/random.h>
 #include <thrust/sequence.h>
 #include <thrust/adjacent_difference.h>
-#include <thrust/adjacent_difference.h>
 #include <thrust/execution_policy.h>
 #include <thrust/binary_search.h>
 #include <iostream>
@@ -16,9 +15,12 @@
 //PI constant
 const float ppi = 3.14159265358979323846;
 //System geometry variables
-const int grid_size = 80;
-const float cell_size = 0.7f;
-const float cutoff = 0.7f;
+const int grid_size = 100;
+const float b = 6.0f;
+const float cutoffb = 1/sqrtf(6);
+const float cutoff_rep = 0.408248290464f;
+const float cutoff = 1.0f;
+const float cell_size = 1.0f;
 const float cutoff_squared = cutoff * cutoff;
 const float box_size = grid_size* cell_size;
 
@@ -107,14 +109,17 @@ __device__  __host__ float wrap_float(float x, float s) {
     return x - s * floor(x / s);
 };
 
+// Particle structure
 struct particle {
     float3 pos;
     float3 force;
     float3 forceel;
     float m;
     float forcem;
+    int idx_chain;
 };
 
+// Particle hash
 struct particleHash {
     int grid_size;
     float cell_size;
@@ -129,8 +134,67 @@ struct particleHash {
     }
 };
 
+// Particle chain index
+struct particleChainIndex {
+    __host__ __device__
+    int operator()(const particle &p) const {
+        return p.idx_chain;
+    }
+};
 
-//Initialize particles in a Ring
+// Kernel that set the cell start and end vectors to -1
+__global__ 
+void setCellStartEnd(int* cell_start, int* cell_end, const int N) {
+    
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    //Reset vector content to -1
+    cell_start[i] = -1;
+    cell_end[i] = -1;
+};
+
+// Kernel that calculates the hashes for particles given grid and cell size
+__global__ 
+void calculateParticleHashes(particle *particles, int*hashes, const int grid_size, const float cell_size, const int N) {
+    
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    particle &p = particles[idx];
+    int cell_x = static_cast<int>(p.pos.x / cell_size);
+    int cell_y = static_cast<int>(p.pos.y / cell_size);
+    int cell_z = static_cast<int>(p.pos.z / cell_size);
+    hashes[idx] = cell_x + grid_size * (cell_y + grid_size * cell_z);
+}
+
+// Kernel that calculates the particle indices according to the chain order
+__global__ 
+void calculateParticleChainIndices(particle *particles, unsigned int*indices, const int N) {
+    
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    particle &p = particles[idx];
+    indices[idx] = p.idx_chain;
+}
+
+// Kernel that calculates in one call the lower and upper bound position of cells
+__global__ 
+void findCellStartEnd(const int* hashes, int* cell_start, int* cell_end, const int N) {
+    
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    //Reset vector content to -1
+    cell_start[i] = -1;
+    cell_end[i] = -1;
+    int current = hashes[i];
+    int prev = (i == 0) ? -1 : hashes[i - 1];
+    int next = (i == N - 1) ? -1 : hashes[i + 1];
+
+    if (i == 0 || current != prev) cell_start[current] = i;
+    if (i == N - 1 || current != next) cell_end[current] = i;
+}
+
+
+// Initialize particles in a Ring
 __global__
 void InitParticlesRing(particle *particles, int N, float L){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -152,9 +216,10 @@ void InitParticlesRing(particle *particles, int N, float L){
     p.forceel.z = 0.0f;
     p.m = 0.0f;
     p.forcem = 0.0f;
+    p.idx_chain = idx;
 }
 
-//Initialize epigenetic field to fixed configuration
+// Initialize epigenetic field to fixed configuration
 __global__
 void InitEpiAvg(particle *particles, const int N, const float avg){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -178,6 +243,7 @@ struct particleInit {
         p.force.x = 0.0f;
         p.force.y = 0.0f;
         p.force.z = 0.0f;
+        p.forcem = 0.0f;
         return p;
     }
 };
@@ -203,11 +269,27 @@ inline float distance_squared(const particle &a, const particle &b) {
 };
 
 __device__
+inline float distance_squared_v(const float3 &a) {
+    float dx = a.x;
+    dx  -= box_size*round(dx/box_size);
+    float dy = a.y;
+    dy  -= box_size*round(dy/box_size);
+    float dz = a.z;
+    dz  -= box_size*round(dz/box_size);
+    return dx * dx + dy * dy + dz * dz;
+};
+
+__device__
 inline float force_module(const float A, const float distance, const float lambda, const float exponent, const float shift){
     
-    float inverse = 1/(distance+shift);
-    inverse = inverse*inverse*inverse*inverse*inverse*inverse;
-    return cos(distance/A)*exp(lambda*distance)*inverse;
+    if distance > 0.05
+        float inverse = 1/(distance+shift);
+        inverse = inverse*inverse-b;
+        // inverse = inverse;
+        return inverse;
+    else
+        float inverse = 500.0;
+        return inverse;
 }
 
 //Function to reset forces
@@ -227,13 +309,106 @@ void reset_forces(particle *particles, const int N){
 
 //Search kernel function
 __global__
-void neighbor_search_kernel(particle *particles, unsigned int *particles_idxs, int *cell_start, int *cell_end, int *particle_hashes,int *num_neighbors,  const int N, const int grid_size, const float cutoff_squared, const float ds, float rep, const float A, const float lambda, const float shiftrep, const int expn, const float gamma) {
+void neighbor_search_kernel(particle *particles, float *forces_x, int *cell_start, int *cell_end, int *particle_hashes,int *num_neighbors,  const int N, const int grid_size, const float cutoff_squared, const float ds, float rep, const float A, const float lambda, const float shiftrep, const int expn, const float gamma) {
     
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (N)) return;
 
+    // // Get particle index from list of indices
+    // int p_idx = particles_idxs[idx];
+    // Get particle
     particle& p = particles[idx];
 
+    //Reset forces
+    p.forcem = 0.0f;
+    p.force.x = 0.0f;
+    p.force.y = 0.0f;
+    p.force.z = 0.0f;
+    
+    // Get the current particle's cell
+    // int hash = particle_hashes[idx];
+
+    // Get integer coordinates of particle
+    int c_x = static_cast<int>(p.pos.x / cell_size);
+    int c_y = static_cast<int>(p.pos.y / cell_size);
+    int c_z = static_cast<int>(p.pos.z / cell_size);
+
+    // Check nearby cells in a 3x3x3 neighborhood
+    for (int dz = -1; dz <= 1; dz++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                
+                int n_x = pmod(c_x+dx,grid_size);
+                int n_y = pmod(c_y+dy,grid_size);
+                int n_z = pmod(c_z+dz,grid_size);
+
+                int neighbor_hash = n_x + grid_size * (n_y + grid_size * n_z);
+
+                // Check the range of particles in this cell
+                int start = cell_start[neighbor_hash];
+                int end = cell_end[neighbor_hash];
+
+                // Exclude cases of empty or single-cell cells
+                if (start == -1 || end == -1) continue;
+
+                int idx_neigh = 0;
+
+                for (int j = start; j < end; j++) {
+                    
+                    
+                    particle &neighbor = particles[j];
+                    float distance = sqrtf(distance_squared(p, neighbor));
+                    int p_idx = p.idx_chain;
+                    int idx_neigh = neighbor.idx_chain;
+
+                    if(distance != 0 && distance <= cutoff_squared){
+
+                        // Forces moduli
+                        float force_mod = 0.0f;
+                        float repulsive_force_mod = 0.0f;
+                        if(distance<cutoff_rep){
+                            repulsive_force_mod = ds*A*force_module(A,distance,-6.0,-expn-1,shiftrep);
+                        }
+                        float attractive_force_mod = lambda*rep*ds*gamma*exp(lambda*distance)*neighbor.m*p.m; // Attractive force;
+
+                        // Add attractive and repulsive forces only among non-nearest neighbors neighbors
+                        if(p_idx != N-1 && p_idx != 0 && p_idx != (idx_neigh - 1) && (p_idx != idx_neigh + 1)){
+                            force_mod = repulsive_force_mod+attractive_force_mod; 
+                        }
+                        else if((p_idx == N-1 && idx_neigh != 0 && idx_neigh != N-2)){
+                            force_mod = repulsive_force_mod+attractive_force_mod;
+                        }
+                        else if((p_idx == 0 && idx_neigh != N-1 && idx_neigh != 1)){
+                            force_mod = repulsive_force_mod+attractive_force_mod;
+                        }
+
+                        //Update force
+                        p.force.x += force_mod*(p.pos.x-neighbor.pos.x)/distance;
+                        p.force.y += force_mod*(p.pos.y-neighbor.pos.y)/distance;
+                        p.force.z += force_mod*(p.pos.z-neighbor.pos.z)/distance;
+                        p.forcem += ds*gamma*exp(lambda*distance)*neighbor.m;
+
+                    }
+                    
+                };
+            }
+        }
+    }
+
+    // Save force
+    forces_x[idx] = p.forcem;
+};
+
+//Search kernel function
+__global__
+void neighbor_search_kernel_noidxs(particle *particles, float *forces_x, int *cell_start, int *cell_end, int *particle_hashes,int *num_neighbors,  const int N, const int grid_size, const float cutoff_squared, const float ds, float rep, const float A, const float lambda, const float shiftrep, const int expn, const float gamma) {
+    
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (N)) return;
+
+    // Get particle
+    particle& p = particles[idx];
+    
     // Get the current particle's cell
     int hash = particle_hashes[idx];
     int c_x = static_cast<int>(p.pos.x / cell_size);
@@ -245,6 +420,8 @@ void neighbor_search_kernel(particle *particles, unsigned int *particles_idxs, i
     float distance = 0.0f;
     float3 distance_vec = make_float3(0.0f,0.0f,0.0f);
     float force_mod = 0.0f;
+    float attractive_force_mod = 0.0f;
+    float repulsive_force_mod = 0.0f;
 
     //Check nearby cells in a 3x3x3 neighborhood
     for (int dz = -1; dz <= 1; dz++) {
@@ -263,59 +440,46 @@ void neighbor_search_kernel(particle *particles, unsigned int *particles_idxs, i
 
                 if (start == -1 || end == -1) continue;
 
-                int num_nbs = 0;
-                int idx_neigh = 0;
-
                 for (int j = start; j < end; j++) {
                     
-                    idx_neigh = particles_idxs[j];
-                    if(idx_neigh != idx){
-                        
+                                            
                         //Get neighbor
-                        particle& neighbor = particles[idx_neigh];
-                        //Update distance
-                        distance_sq = distance_squared(p, neighbor);
-                        // //Update distance vector
-                        distance_vec.x = p.pos.x-neighbor.pos.x;
-                        distance_vec.y = p.pos.y-neighbor.pos.y;
-                        distance_vec.z = p.pos.z-neighbor.pos.z;
+                        particle& neighbor = particles[j];
+                        float distance = sqrtf(distance_squared(p, neighbor));
+                        if(distance!=0.0){
+                        
 
-                        if (distance_sq <= cutoff_squared) //Calculate only if in radius of interaction
-                        {
-                            distance = sqrtf(distance_sq);
-                            if(distance < ppi/2*A){
-                                force_mod = 10*ds*force_module(A,distance,-11.0,-expn-1,shiftrep);
-                            }
+                            if (distance <= cutoff) //Calculate only if in radius of interaction
+                            {
+                                // //Update distance vector
+                                distance_vec.x = p.pos.x-neighbor.pos.x;
+                                distance_vec.y = p.pos.y-neighbor.pos.y;
+                                distance_vec.z = p.pos.z-neighbor.pos.z;
 
-                            // Add attractive force only among non-nearest neighbors neighbors
-                            if(idx != N-1 && idx != 0 && idx != (idx_neigh - 1) && (idx != idx_neigh + 1)){
-                                force_mod -= rep*ds*gamma*exp(lambda*distance)*neighbor.m*p.m;
-                            }else if((idx == N-1 && idx_neigh != 0 && idx_neigh != N-2)){
-                                force_mod -= rep*ds*gamma*exp(lambda*distance)*neighbor.m*p.m;
-                            }else if((idx == 0 && idx_neigh != N-1 && idx_neigh != 1)){
-                                force_mod -= rep*ds*gamma*exp(lambda*distance)*neighbor.m*p.m;
+                                attractive_force_mod = lambda*rep*ds*gamma*exp(lambda*distance)*neighbor.m*p.m; // Attractive force;
+                                repulsive_force_mod = ds*A*force_module(A,distance,-2.0,-expn-1,shiftrep);
+
+                                // Add attractive force only among non-nearest neighbors neighbors
+                                force_mod = repulsive_force_mod; // Repulsive force
+                                force_mod += attractive_force_mod;
+                                p.force.x += force_mod*distance_vec.x/distance;
+                                p.force.y += force_mod*distance_vec.y/distance;
+                                p.force.z += force_mod*distance_vec.z/distance;
+                                p.forcem += ds*gamma*exp(lambda*distance)*neighbor.m;
                             }
-                            p.force.x += 0.01*force_mod*distance_vec.x/distance;
-                            p.force.y += 0.01*force_mod*distance_vec.y/distance;
-                            p.force.z += 0.01*force_mod*distance_vec.z/distance;
-                            // Apply equal and opposite to neighbor
-                            atomicAdd(&(neighbor.force.x), -0.01*force_mod*distance_vec.x/distance);
-                            atomicAdd(&(neighbor.force.y), -0.01*force_mod*distance_vec.y/distance);
-                            atomicAdd(&(neighbor.force.z), -0.01*force_mod*distance_vec.z/distance);
-                            // //Calculate force on epigenetic field
-                            p.forcem += ds*gamma*exp(lambda*distance)*neighbor.m;
-                            atomicAdd(&(neighbor.forcem), ds*gamma*exp(lambda*distance)*p.m);
-                        }
                     }
                     
-                };
+                }
             }
         }
     }
+    forces_x[idx] = p.force.x;
+
 };
 
+
 __global__
-void update_particles(particle *particles,  int N, thrust::random::default_random_engine* engines, thrust::random::default_random_engine* engines_m, thrust::random::normal_distribution<float>* ndists, thrust::random::normal_distribution<float>* ndists_m, const float dt, const float D, const float lambda, const float rd, const float rm)
+void update_particles(particle *particles,  int N, thrust::random::default_random_engine* engines, thrust::random::default_random_engine* engines_m, thrust::random::normal_distribution<float>* ndists, thrust::random::normal_distribution<float>* ndists_m, const float dt, const float D, const float lambda, const float rd, const float rm, const float dtnoise, const float epiev)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (N)) return;
@@ -331,19 +495,15 @@ void update_particles(particle *particles,  int N, thrust::random::default_rando
     engm.discard(idx);
 
     //Evolve according to Langevin equation
-    p.pos.x += dt*(p.force.x+p.forceel.x) + sqrtf(2*D*dt)*distr(eng);
-    p.pos.y += dt*(p.force.y+p.forceel.y) + sqrtf(2*D*dt)*distr(eng);
-    p.pos.z += dt*(p.force.z+p.forceel.z) + sqrtf(2*D*dt)*distr(eng);
+    p.pos.x += dt*(p.force.x+p.forceel.x) + dtnoise*distr(eng);
+    p.pos.y += dt*(p.force.y+p.forceel.y) + dtnoise*distr(eng);
+    p.pos.z += dt*(p.force.z+p.forceel.z) + dtnoise*distr(eng);
 
     p.pos.x = wrap_float(p.pos.x, box_size);
     p.pos.y = wrap_float(p.pos.y, box_size);
     p.pos.z = wrap_float(p.pos.z, box_size);
 
-    p.m += dt*(p.forcem - rd*p.m + rm - lambda*p.m*p.m*p.m-0.1*p.m*p.m*p.m*p.m*p.m) + sqrtf(2*D*dt)*distrm(engm);
-
-    // p.force.x = 0.0f;
-    // p.force.y = 0.0f;
-    // p.force.z = 0.0f;
+    p.m += epiev*(dt*(p.forcem - rd*p.m + rm - lambda*p.m*p.m*p.m-p.m*p.m*p.m*p.m*p.m) + dtnoise*distr(eng));
 
 };
 
@@ -358,8 +518,6 @@ void elastic_force(particle *particles, const float kel, const float r0, const i
     particle& p = particles[idx];
     int idx_prev = 0;
     int idx_forw = 0;
-    float rdprev = 0.0f;
-    float rdforw = 0.0f;
     
     //Get indices of previous and next particle on the chain
     if (idx == 0){
@@ -379,24 +537,28 @@ void elastic_force(particle *particles, const float kel, const float r0, const i
     particle& neigh_prev = particles[idx_prev];
     particle& neigh_forw = particles[idx_forw];
     //Calculate distances of nearest neighbours
-    rdprev = sqrtf(distance_squared(p, neigh_prev));
-    rdforw = sqrtf(distance_squared(p, neigh_forw));
     float3 vecprev = make_float3(p.pos.x-neigh_prev.pos.x,p.pos.y-neigh_prev.pos.y,p.pos.z-neigh_prev.pos.z);
     float3 vecforw = make_float3(p.pos.x-neigh_forw.pos.x,p.pos.y-neigh_forw.pos.y,p.pos.z-neigh_forw.pos.z);
-    
+    float distprev = sqrtf(distance_squared_v(vecprev));
+    float distforw = sqrtf(distance_squared_v(vecforw));
+    float coeffprev = (distprev-r0)/distprev;
+    float coeffforw = (distforw-r0)/distforw;
+
     //Calculate elastic force
-    p.forceel.x = -kel*(vecprev.x);
-    p.forceel.y = -kel*(vecprev.y);
-    p.forceel.z = -kel*(vecprev.z);
-    p.forceel.x -= kel*(vecforw.x);
-    p.forceel.y -= kel*(vecforw.y);
-    p.forceel.z -= kel*(vecforw.z);
+    p.forceel.x = -kel*(vecprev.x)*coeffprev;
+    p.forceel.y = -kel*(vecprev.y)*coeffprev;
+    p.forceel.z = -kel*(vecprev.z)*coeffprev;
+    p.forceel.x -= kel*(vecforw.x)*coeffforw;
+    p.forceel.y -= kel*(vecforw.y)*coeffforw;
+    p.forceel.z -= kel*(vecforw.z)*coeffforw;
+
 
 };
 
-// Calculate elastic force
+// Calculate elastic force with FENE force
 __global__
-void elastic_force_FENE(particle *particles, const float kel, const float r0, const int N){
+void elastic_force_FENE(particle *particles, const float kel, const float r0, const float r0sq, const float r0threshold, const float req,
+                        const int N){
     
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (N)) return;
@@ -426,33 +588,34 @@ void elastic_force_FENE(particle *particles, const float kel, const float r0, co
     particle& neigh_prev = particles[idx_prev];
     particle& neigh_forw = particles[idx_forw];
     //Calculate distances of nearest neighbours
-    rdprev = sqrtf(distance_squared(p, neigh_prev));
-    rdforw = sqrtf(distance_squared(p, neigh_forw));
-    float3 vecprev = make_float3(p.pos.x-neigh_prev.pos.x,p.pos.y-neigh_prev.pos.y,p.pos.z-neigh_prev.pos.z);
-    float3 vecforw = make_float3(p.pos.x-neigh_forw.pos.x,p.pos.y-neigh_forw.pos.y,p.pos.z-neigh_forw.pos.z);
-    
+    // rdprev = distance_squared(p, neigh_prev);
+    // rdforw = distance_squared(p, neigh_forw);
+    float3 vecprev = make_float3(p.pos.x-neigh_prev.pos.x-req,p.pos.y-neigh_prev.pos.y-req,p.pos.z-neigh_prev.pos.z-req);
+    float3 vecforw = make_float3(p.pos.x-neigh_forw.pos.x-req,p.pos.y-neigh_forw.pos.y-req,p.pos.z-neigh_forw.pos.z-req);
+    rdprev = distance_squared_v(vecprev);
+    rdforw = distance_squared_v(vecforw);
     
     //Calculate elastic force
-    if(rdprev > r0){
+    if(rdprev > r0threshold){
         p.forceel.x = -100*vecprev.x;
         p.forceel.y = -100*vecprev.y;
         p.forceel.z = -100*vecprev.z;
     }
     else{
-        p.forceel.x = kel*(vecprev.x)/(1-rdprev*rdprev/(r0*r0));
-        p.forceel.y = kel*(vecprev.y)/(1-rdprev*rdprev/(r0*r0));
-        p.forceel.z = kel*(vecprev.z)/(1-rdprev*rdprev/(r0*r0));
+        p.forceel.x = -kel*(vecprev.x)/(1-rdprev/r0sq);
+        p.forceel.y = -kel*(vecprev.y)/(1-rdprev/r0sq);
+        p.forceel.z = -kel*(vecprev.z)/(1-rdprev/r0sq);
 
     }
-    if(rdforw > r0){
-        p.forceel.x += -100*vecprev.x;
-        p.forceel.y += -100*vecprev.y;
-        p.forceel.z += -100*vecprev.z;
+    if(rdforw > r0threshold){
+        p.forceel.x -= 100*vecforw.x;
+        p.forceel.y -= 100*vecforw.y;
+        p.forceel.z -= 100*vecforw.z;
     }
     else{
-        p.forceel.x += kel*(vecforw.x)/(1-rdforw*rdforw/(r0*r0));
-        p.forceel.y += kel*(vecforw.y)/(1-rdforw*rdforw/(r0*r0));
-        p.forceel.z += kel*(vecforw.z)/(1-rdforw*rdforw/(r0*r0));
+        p.forceel.x -= kel*(vecforw.x)/(1-rdforw/r0sq);
+        p.forceel.y -= kel*(vecforw.y)/(1-rdforw/r0sq);
+        p.forceel.z -= kel*(vecforw.z)/(1-rdforw/r0sq);
 
     }
 

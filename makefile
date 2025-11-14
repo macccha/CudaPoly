@@ -4,13 +4,16 @@ CudaCC := nvcc
 objects := polydyn.o polydynOpt.o
 
 $(objects): mainc.cu particleslist.h
-	$(CudaCC) -I$(jsonInclude) -c mainc.cu -o $@ -O3
+	$(CudaCC) -I$(jsonInclude) -c mainc.cu -o $@
 
 polydyn: polydyn.o
-	$(CudaCC) -I$(jsonInclude) $< -o $@
+	$(CudaCC) $< -o $@
 
 polydynOpt: polydynOpt.o
-	$(CudaCC) -I$(jsonInclude) $< -o $@ $(OptFlag)
+	$(CudaCC) $< -o $@ $(OptFlag)
+
+polydynTest: polydynTest.o
+	$(CudaCC) $< -o $@ $(OptFlag)
 
 clean:
 	rm -f polydyn

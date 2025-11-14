@@ -1,0 +1,23 @@
+{
+    "saveflag": "NoLJ",
+    "N":1024,
+    "L": 102.4,
+    "dt": 0.00001,
+    "T": 20,
+    "D": 0.5,
+    "threads_per_block": 256,
+    "A": 0.15,
+    "lambda": -1.0,
+    "shiftrep": 0.0,
+    "expn": -6,
+    "kel": 100.0,
+    "r0": 0.8,
+    "req": 0.10,
+    "rd": 30.0,
+    "rm": 0.0,
+    "lambdam": 28.0,
+    "gammam": 0.5,
+    "is_epi_dyn": 0.0,
+    "init_epi_value": 1.2,
+    "t_save": 10000
+}

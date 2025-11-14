@@ -1,60 +1,33 @@
 #!/bin/bash
 
-#SBATCH --time=4:00:00
-#SBATCH --ntasks=1  # number of processor cores (i.e. tasks)
-#SBATCH --partition=graphic
-#SBATCH --gres=gpu:1
-
-#medium 2-00:00:00
-#short 02:00:00
-#long 14-00:00:00
-
-#SBATCH --cpus-per-task=1
-#SBATCH --mem-per-cpu=20G
-
-# If you so choose Slurm will notify you when certain events happen for your job 
-# for a full list of possible options look furhter down
-#SBATCH --mail-type END
-
-#SBATCH --job-name="Polycuda"
-
-#SBATCH --output=/home/ciarchi/Documents/Slurm/R-%j-%x.out
-#SBATCH --error=/home/ciarchi/Documents/Slurm/R-%j-%x.err
-
-#
-# Prepare your environment
-#
-
-# causes jobs to fail if one command fails - makes failed jobs easier to find with tools like sacct
+#Mode of execution
+MODE=$1
+#Time of execution if present
+TIME=$2
 
 set -e
 
-# load modules
+#Move to program folder
+cd /data/others/ciarchi/PolymerDyn/CudaPoly/
+module load cuda/12.1
 
-module load cuda/12.5
-export CUDA_VISIBLE_DEVICES=$SLURM_JOB_GPUS
-
-# Set variables you need
-project="/data/others/ciarchi/PolymerDyn"
-results="/data/others/ciarchi/PolymerDyn/$SLURM_JOB_ID"
-scratch="/scratch/$USER/$SLURM_JOB_ID"
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
-
-
-TIME=$(squeue -j $SLURM_JOB_ID -h --Format TimeLimit)
-
-mkdir -p $scratch
-#cd $scratch
-cd $project
-
-#Make executable
-srun make polydynOpt
-#Run
-srun ./polydynOpt
-
-# Clean up after yourself
-cd
-rm -rf $scratch
-
-# exit gracefully
-exit 0
+if [[ "$MODE" == "test" ]]; then
+    echo "Launching test program."
+    module load cuda/12.1
+    make polydyn
+    ./polydyn test
+elif [[ "$MODE" == "slurm" ]]; then
+    if [[ $# -ne 2 ]]; then
+        echo "Insufficient number of arguments. Arguments must include the time for job run in the formah HH:MM:SS"
+        exit 1
+    elif ! [[ "$TIME" =~ ^([0-9]{2}):([0-9]{2}):([0-9]{2})$ ]]; then
+        echo "Error: time format must be HH:MM:SS"
+        exit 1
+    else
+        echo "Submitting job to SLURM for time $2."
+        sbatch --time="$TIME"  ./launchpolyslurm.sh
+    fi
+else
+   echo "Missing mode of launching. Give as argument either 'test' or 'slurm'."
+   exit 1
+fi
