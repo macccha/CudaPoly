@@ -12,7 +12,9 @@ cd /data/others/ciarchi/PolymerDyn/CudaPoly/
 module load cuda/12.1
 
 if [[ "$MODE" == "test" ]]; then
+    echo
     echo "Launching test program."
+    echo
     module load cuda/12.1
     make polydyn
     ./polydyn test
@@ -24,7 +26,9 @@ elif [[ "$MODE" == "slurm" ]]; then
         echo "Error: time format must be HH:MM:SS"
         exit 1
     else
+        echo
         echo "Submitting job to SLURM for time $2."
+        echo
         sbatch --time="$TIME"  ./launchpolyslurm.sh
     fi
 else

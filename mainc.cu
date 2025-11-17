@@ -28,8 +28,8 @@ int main(int argc, char *argv[])
     // Load parameters
     const std::string saveflag = params["saveflag"];
     const int N = params["N"]; //Bitshift definition, 2^bitshift particles 
-    const float L = params["L"];
-    const float ds = L/N;
+    const float L = params["L"]; // Length of the polymer
+    const float ds = L/N; // Space step resolution
     const float dt = params["dt"];
     const float T = params["T"];
     const int Tsteps = T/dt;
@@ -37,8 +37,9 @@ int main(int argc, char *argv[])
     // Define GPU threads and block variables
     const int threads_per_block = params["threads_per_block"];
     const int num_blocks = (N + threads_per_block - 1) / threads_per_block;
-    //Timestep for noise term
-    const float dtnoise = sqrtf(2*dt*D);
+    
+    const float dtnoise = sqrtf(2*dt*D); // Timestep for noise term
+    
     // Parameters for dynamics of polymer
     const float A = params["A"]; 
     const float lambda = params["lambda"];
@@ -54,6 +55,8 @@ int main(int argc, char *argv[])
     const float rm = params["rm"]; // Methylation rate
     const float lambdam = params["lambdam"]; // Quartic interaction
     const float gammam = params["gammam"]; // Polymer-epigenetic field interaction
+    const float Dm = params["Dm"]; //Laplacian prefactor for scalar field
+    const float Dmfactor = Dm/(ds*ds);
     // Parameters for evolution at constant epigenet field
     const float is_epi_dyn = params["is_epi_dyn"]; // Is the epigenetic field fixed?
     const float init_epi_value = params["init_epi_value"]; // Value of fixed epigenetic field
@@ -85,16 +88,24 @@ int main(int argc, char *argv[])
     
     //Initialize vectors for particles, cells and hashes
     thrust::device_vector<particle> particles(N);
-    thrust::device_vector<unsigned int> particles_idxs(N);
+    thrust::device_vector<float4> positions(N);
+    thrust::device_vector<float4> forces(N);
+    thrust::device_vector<float4> elasticforces(N);
+    thrust::device_vector<unsigned int> chain_indices(N);
+    thrust::device_vector<unsigned int> d_id_to_index(N);
+    thrust::device_vector<unsigned int> sorting_idxs(N);
     thrust::device_vector<int> particle_hashes(N);
     thrust::device_vector<int> cell_start(grid_size * grid_size * grid_size, -1);
     thrust::device_vector<int> cell_end(grid_size * grid_size * grid_size, -1);
     thrust::device_vector<int> num_neighbors(N);
     thrust::device_vector<float> forces_x(N);
 
+    //Duplicate vectors for gather out-of-place operations
+    thrust::device_vector<unsigned int> chain_indices_dup(N);
+    thrust::device_vector<float4> positions_dup(N);
 
     //Initialize vectors to save particle positions, create counter to save
-    thrust::device_vector<particle> save_vectors(Nt_save*N);
+    thrust::device_vector<float4> save_vectors(Nt_save*N);
     
     //Counter for saving
     int counter = 0;
@@ -106,11 +117,18 @@ int main(int argc, char *argv[])
     thrust::counting_iterator<unsigned int> index_sequence(1);
     //Initialize particles in ring formation
     InitParticlesRing<<<num_blocks, threads_per_block>>>(
-            thrust::raw_pointer_cast(particles.data()),
+            thrust::raw_pointer_cast(positions.data()),
+            thrust::raw_pointer_cast(forces.data()),
+            thrust::raw_pointer_cast(elasticforces.data()),
+            thrust::raw_pointer_cast(chain_indices.data()),
             N, L
         );
     // thrust::transform(index_sequence, index_sequence + N, particles.begin(), particleInit());
-    thrust::sequence(particles_idxs.begin(), particles_idxs.end());
+    // thrust::sequence(particles_idxs.begin(), particles_idxs.end());
+    thrust::sequence(chain_indices.begin(), chain_indices.end());
+    thrust::sequence(chain_indices_dup.begin(), chain_indices_dup.end());
+    thrust::sequence(d_id_to_index.begin(), d_id_to_index.end());
+    thrust::sequence(sorting_idxs.begin(), sorting_idxs.end());
     thrust::device_vector<int> unique_hashes(grid_size * grid_size * grid_size);
     thrust::sequence(unique_hashes.begin(), unique_hashes.end());
 
@@ -133,26 +151,31 @@ int main(int argc, char *argv[])
 
         //Update elastic forces between two consecutive particles: first need to resort array
         elastic_force<<<num_blocks, threads_per_block>>>(
-            thrust::raw_pointer_cast(particles.data()),
-            kel, req, N
+            thrust::raw_pointer_cast(positions.data()),
+            thrust::raw_pointer_cast(chain_indices.data()),
+            thrust::raw_pointer_cast(d_id_to_index.data()),
+            thrust::raw_pointer_cast(elasticforces.data()),
+            kel, req, Dmfactor, N
         );
 
         //Update particles positions
         update_particles<<<num_blocks, threads_per_block>>>(
-            thrust::raw_pointer_cast(particles.data()),
+            thrust::raw_pointer_cast(positions.data()),
+            thrust::raw_pointer_cast(forces.data()),
+            thrust::raw_pointer_cast(elasticforces.data()),
             N,
             thrust::raw_pointer_cast(random_engines.data()),
             thrust::raw_pointer_cast(random_engines_m.data()),
             thrust::raw_pointer_cast(normal_distrs.data()),
             thrust::raw_pointer_cast(normal_distrs_m.data()),
-            dt, D, lambdam, rd, rm, dtnoise, 1
+            dt, D, lambdam, rd, rm, dtnoise, 0.0
         );
 
         cudaDeviceSynchronize();
 
         //Copy data
         if(step % t_save == 0){
-            thrust::copy(particles.begin(), particles.end(), save_vectors.begin() + counter * N);
+            thrust::copy(positions.begin(), positions.end(), save_vectors.begin() + counter * N);
             counter += 1;   
         }
     };
@@ -170,18 +193,30 @@ int main(int argc, char *argv[])
 
             //Create vector of particle hashes
             calculateParticleHashes<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(particles.data()),
+                thrust::raw_pointer_cast(positions.data()),
                 thrust::raw_pointer_cast(particle_hashes.data()),
                 grid_size,
                 cell_size,
                 N
             );
-            // Order particle indices by hash
-            thrust::sort_by_key(thrust::device,particle_hashes.begin(), particle_hashes.end(), particles.begin());
+
+
+            // Order particle indices and position by by hashes
+            thrust::sequence(sorting_idxs.begin(), sorting_idxs.end()); // Reindex vector of indices
+            thrust::sort_by_key(thrust::device, particle_hashes.begin(), particle_hashes.end(), sorting_idxs.begin()); // Order indices by hashes
+            thrust::gather(thrust::device, sorting_idxs.begin(), sorting_idxs.end(), positions.begin(), positions_dup.begin());
+            thrust::gather(thrust::device, sorting_idxs.begin(), sorting_idxs.end(), chain_indices.begin(), chain_indices_dup.begin());
+            thrust::copy(positions_dup.begin(), positions_dup.end(), positions.begin());
+            thrust::copy(chain_indices_dup.begin(), chain_indices_dup.end(), chain_indices.begin());
+
+            // Map particles chain indices to vector indices
+            MapChainIDToIndex<<<num_blocks, threads_per_block>>>(
+                thrust::raw_pointer_cast(chain_indices.data()), 
+                thrust::raw_pointer_cast(d_id_to_index.data()), 
+                N
+            );
 
             // Get initial and final indexes of unique cell hashes in particles vector
-            // setCellStartEnd<<<num_blocks, threads_per_block>>>(thrust::raw_pointer_cast(cell_start.data()),
-            //     thrust::raw_pointer_cast(cell_end.data()),N);
             findCellStartEnd<<<num_blocks, threads_per_block>>>(
                 thrust::raw_pointer_cast(particle_hashes.data()), 
                 thrust::raw_pointer_cast(cell_start.data()), 
@@ -191,8 +226,9 @@ int main(int argc, char *argv[])
 
             //Do neighbor search and update forces according to two-body interactions
             neighbor_search_kernel<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(particles.data()),
-                // thrust::raw_pointer_cast(particles_idxs.data()),
+                thrust::raw_pointer_cast(positions.data()),
+                thrust::raw_pointer_cast(forces.data()),
+                thrust::raw_pointer_cast(chain_indices.data()),
                 thrust::raw_pointer_cast(forces_x.data()),
                 thrust::raw_pointer_cast(cell_start.data()),
                 thrust::raw_pointer_cast(cell_end.data()),
@@ -202,15 +238,6 @@ int main(int argc, char *argv[])
             );
 
             cudaDeviceSynchronize();
-
-            // Reorder particles according to index chain for elastic force calculation and saving
-            calculateParticleChainIndices<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(particles.data()),
-                thrust::raw_pointer_cast(particles_idxs.data()),
-                N
-            );
-            thrust::sort_by_key(thrust::device,particles_idxs.begin(), particles_idxs.end(), particles.begin());
-        
 
             // float totforcex = 0.0;
             // for(int i = 0; i < N; i ++){
@@ -222,65 +249,88 @@ int main(int argc, char *argv[])
 
         }
 
-        //Update elastic forces between two consecutive particles
+        //Update elastic forces between two consecutive particles: first need to resort array
         elastic_force<<<num_blocks, threads_per_block>>>(
-            thrust::raw_pointer_cast(particles.data()),
-            kel, req, N
+            thrust::raw_pointer_cast(positions.data()),
+            thrust::raw_pointer_cast(chain_indices.data()),
+            thrust::raw_pointer_cast(d_id_to_index.data()),
+            thrust::raw_pointer_cast(elasticforces.data()),
+            kel, req, Dmfactor, N
         );
 
         //Update particles positions
         update_particles<<<num_blocks, threads_per_block>>>(
-            thrust::raw_pointer_cast(particles.data()),
+            thrust::raw_pointer_cast(positions.data()),
+            thrust::raw_pointer_cast(forces.data()),
+            thrust::raw_pointer_cast(elasticforces.data()),
             N,
             thrust::raw_pointer_cast(random_engines.data()),
             thrust::raw_pointer_cast(random_engines_m.data()),
             thrust::raw_pointer_cast(normal_distrs.data()),
             thrust::raw_pointer_cast(normal_distrs_m.data()),
-            dt, D, lambdam, rd, rm, dtnoise, 1
+            dt, D, lambdam, rd, rm, dtnoise, 1.0
         );
 
         cudaDeviceSynchronize();
 
-        //Copy data
+        //Copy data. Sort again before saving
+        // thrust::sort_by_key(thrust::device, chain_indices.begin(), chain_indices.end(), positions.begin());
         if(step % t_save == 0){
-            thrust::copy(particles.begin(), particles.end(), save_vectors.begin() + counter * N);
+            CopyArrayToSave<<<num_blocks, threads_per_block>>>(
+                thrust::raw_pointer_cast(save_vectors.data()),
+                thrust::raw_pointer_cast(positions.data()),
+                thrust::raw_pointer_cast(chain_indices.data()),
+                counter * N, N);
             counter += 1;
         }
     };
 
-    printf("Equilibrating polymer with constant field...\n");
+    if(is_epi_dyn == 1.0){
+        printf("Starting polymer evolution...\n");
+    }
+    else{
+        printf("Equilibrating polymer with constant field...\n");
+    }
+    
 
     //Set rep to correct value
     rep = 1.0;//pi*A;
 
     //Initialize epigentic field to certain average
-    InitEpiAvg<<<num_blocks, threads_per_block>>>(thrust::raw_pointer_cast(particles.data()), N, init_epi_value);
+    InitEpiAvg<<<num_blocks, threads_per_block>>>(thrust::raw_pointer_cast(positions.data()), N, init_epi_value);
 
     cudaDeviceSynchronize();
 
     //Equilibrate polymer with certain fixed methylation average
     for(int step = stop2; step < stop3; step++){
         
-
         if(step % 5 == 0){
-            
+
             //Create vector of particle hashes
             calculateParticleHashes<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(particles.data()),
+                thrust::raw_pointer_cast(positions.data()),
                 thrust::raw_pointer_cast(particle_hashes.data()),
                 grid_size,
                 cell_size,
                 N
             );
-            //Create vector of particle hashes
-            // thrust::transform(particles.begin(), particles.end(), particle_hashes.begin(),
-                            // particleHash{grid_size, cell_size});
-            // Order particle indices by hash
-            thrust::sort_by_key(thrust::device,particle_hashes.begin(), particle_hashes.end(), particles.begin());
+
+            // Order particle indices and position by by hashes
+            thrust::sequence(sorting_idxs.begin(), sorting_idxs.end()); // Reindex vector of indices
+            thrust::sort_by_key(thrust::device, particle_hashes.begin(), particle_hashes.end(), sorting_idxs.begin()); // Order indices by hashes
+            thrust::gather(thrust::device, sorting_idxs.begin(), sorting_idxs.end(), positions.begin(), positions_dup.begin());
+            thrust::gather(thrust::device, sorting_idxs.begin(), sorting_idxs.end(), chain_indices.begin(), chain_indices_dup.begin());
+            thrust::copy(positions_dup.begin(), positions_dup.end(), positions.begin());
+            thrust::copy(chain_indices_dup.begin(), chain_indices_dup.end(), chain_indices.begin());
+
+            // Map particles chain indices to vector indices
+            MapChainIDToIndex<<<num_blocks, threads_per_block>>>(
+                thrust::raw_pointer_cast(chain_indices.data()), 
+                thrust::raw_pointer_cast(d_id_to_index.data()), 
+                N
+            );
 
             // Get initial and final indexes of unique cell hashes in particles vector
-            // setCellStartEnd<<<num_blocks, threads_per_block>>>(thrust::raw_pointer_cast(cell_start.data()), 
-            //     thrust::raw_pointer_cast(cell_end.data()),N);
             findCellStartEnd<<<num_blocks, threads_per_block>>>(
                 thrust::raw_pointer_cast(particle_hashes.data()), 
                 thrust::raw_pointer_cast(cell_start.data()), 
@@ -290,93 +340,9 @@ int main(int argc, char *argv[])
 
             //Do neighbor search and update forces according to two-body interactions
             neighbor_search_kernel<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(particles.data()),
-                // thrust::raw_pointer_cast(particles_idxs.data()),
-                thrust::raw_pointer_cast(forces_x.data()),
-                thrust::raw_pointer_cast(cell_start.data()),
-                thrust::raw_pointer_cast(cell_end.data()),
-                thrust::raw_pointer_cast(particle_hashes.data()),
-                thrust::raw_pointer_cast(num_neighbors.data()),
-                N, grid_size, cutoff_squared, ds, 1.0, 1.0, lambda, shiftrep, expn, gammam
-            );
-
-
-            // Reorder particles according to index chain for elastic force calculation and saving
-            calculateParticleChainIndices<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(particles.data()),
-                thrust::raw_pointer_cast(particles_idxs.data()),
-                N
-            );
-
-            thrust::sort_by_key(thrust::device,particles_idxs.begin(), particles_idxs.end(), particles.begin());
-
-
-        
-        }
-
-        //Update elastic forces between two consecutive particles
-        elastic_force<<<num_blocks, threads_per_block>>>(
-            thrust::raw_pointer_cast(particles.data()),
-            kel, req, N
-        );
-
-        //Update particles positions
-        update_particles<<<num_blocks, threads_per_block>>>(
-            thrust::raw_pointer_cast(particles.data()),
-            N,
-            thrust::raw_pointer_cast(random_engines.data()),
-            thrust::raw_pointer_cast(random_engines_m.data()),
-            thrust::raw_pointer_cast(normal_distrs.data()),
-            thrust::raw_pointer_cast(normal_distrs_m.data()),
-            dt, D, lambdam, rd, rm, dtnoise, is_epi_dyn
-        );
-
-        cudaDeviceSynchronize();
-
-        //Copy data
-        if(step % t_save == 0){
-            thrust::copy(particles.begin(), particles.end(), save_vectors.begin() + counter * N);
-            counter += 1;
-        }
-    };
-
-
-    printf("Evolve. Counter is at %d...\n", counter);
-
-
-    //Evolve as interacting walk
-    for(int step = stop3; step < Tsteps; step++){
-        
-
-        if(step % 5 == 0){
-    
-            //Create vector of particle hashes
-            calculateParticleHashes<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(particles.data()),
-                thrust::raw_pointer_cast(particle_hashes.data()),
-                grid_size,
-                cell_size,
-                N
-            );
-            //Create vector of particle hashes
-            // thrust::transform(particles.begin(), particles.end(), particle_hashes.begin(),
-                            // particleHash{grid_size, cell_size});
-            // Order particle indices by hash
-            thrust::sort_by_key(thrust::device,particle_hashes.begin(), particle_hashes.end(), particles.begin());
-
-            // Get initial and final indexes of unique cell hashes in particles vector
-            // setCellStartEnd<<<num_blocks, threads_per_block>>>(thrust::raw_pointer_cast(cell_start.data()), 
-            //     thrust::raw_pointer_cast(cell_end.data()),N);
-            findCellStartEnd<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(particle_hashes.data()), 
-                thrust::raw_pointer_cast(cell_start.data()), 
-                thrust::raw_pointer_cast(cell_end.data()), 
-                N
-            );
-            
-            //Do neighbor search and update forces according to two-body interactions
-            neighbor_search_kernel<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(particles.data()),
+                thrust::raw_pointer_cast(positions.data()),
+                thrust::raw_pointer_cast(forces.data()),
+                thrust::raw_pointer_cast(chain_indices.data()),
                 // thrust::raw_pointer_cast(particles_idxs.data()),
                 thrust::raw_pointer_cast(forces_x.data()),
                 thrust::raw_pointer_cast(cell_start.data()),
@@ -388,25 +354,117 @@ int main(int argc, char *argv[])
 
             cudaDeviceSynchronize();
 
-            // Reorder particles according to index chain for elastic force calculation and saving
-            calculateParticleChainIndices<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(particles.data()),
-                thrust::raw_pointer_cast(particles_idxs.data()),
-                N
-            );
-            thrust::sort_by_key(thrust::device,particles_idxs.begin(), particles_idxs.end(), particles.begin());
-        
         }
 
-        //Update elastic forces between two consecutive particles
+        //Update elastic forces between two consecutive particles: first need to resort array
         elastic_force<<<num_blocks, threads_per_block>>>(
-            thrust::raw_pointer_cast(particles.data()),
-            kel, req, N
+            thrust::raw_pointer_cast(positions.data()),
+            thrust::raw_pointer_cast(chain_indices.data()),
+            thrust::raw_pointer_cast(d_id_to_index.data()),
+            thrust::raw_pointer_cast(elasticforces.data()),
+            kel, req, Dmfactor, N
         );
 
         //Update particles positions
         update_particles<<<num_blocks, threads_per_block>>>(
-            thrust::raw_pointer_cast(particles.data()),
+            thrust::raw_pointer_cast(positions.data()),
+            thrust::raw_pointer_cast(forces.data()),
+            thrust::raw_pointer_cast(elasticforces.data()),
+            N,
+            thrust::raw_pointer_cast(random_engines.data()),
+            thrust::raw_pointer_cast(random_engines_m.data()),
+            thrust::raw_pointer_cast(normal_distrs.data()),
+            thrust::raw_pointer_cast(normal_distrs_m.data()),
+            dt, D, lambdam, rd, rm, dtnoise, is_epi_dyn
+        );
+
+        cudaDeviceSynchronize();
+
+        //Copy data. Sort again before saving
+        // thrust::sort_by_key(thrust::device, chain_indices.begin(), chain_indices.end(), positions.begin());
+        if(step % t_save == 0){
+            CopyArrayToSave<<<num_blocks, threads_per_block>>>(
+                thrust::raw_pointer_cast(save_vectors.data()),
+                thrust::raw_pointer_cast(positions.data()),
+                thrust::raw_pointer_cast(chain_indices.data()),
+                counter * N, N);
+            counter += 1;
+        }
+    };
+
+    if(is_epi_dyn == 0){
+        printf("Evolve. Counter is at %d...\n", counter);
+    }
+
+    //Evolve as interacting walk
+    for(int step = stop3; step < Tsteps; step++){
+        
+        if(step % 5 == 0){
+
+            //Create vector of particle hashes
+            calculateParticleHashes<<<num_blocks, threads_per_block>>>(
+                thrust::raw_pointer_cast(positions.data()),
+                thrust::raw_pointer_cast(particle_hashes.data()),
+                grid_size,
+                cell_size,
+                N
+            );
+
+            // Order particle indices and position by by hashes
+            thrust::sequence(sorting_idxs.begin(), sorting_idxs.end()); // Reindex vector of indices
+            thrust::sort_by_key(thrust::device, particle_hashes.begin(), particle_hashes.end(), sorting_idxs.begin()); // Order indices by hashes
+            thrust::gather(thrust::device, sorting_idxs.begin(), sorting_idxs.end(), positions.begin(), positions_dup.begin());
+            thrust::gather(thrust::device, sorting_idxs.begin(), sorting_idxs.end(), chain_indices.begin(), chain_indices_dup.begin());
+            thrust::copy(positions_dup.begin(), positions_dup.end(), positions.begin());
+            thrust::copy(chain_indices_dup.begin(), chain_indices_dup.end(), chain_indices.begin());
+
+            // Map particles chain indices to vector indices
+            MapChainIDToIndex<<<num_blocks, threads_per_block>>>(
+                thrust::raw_pointer_cast(chain_indices.data()), 
+                thrust::raw_pointer_cast(d_id_to_index.data()), 
+                N
+            );
+
+            // Get initial and final indexes of unique cell hashes in particles vector
+            findCellStartEnd<<<num_blocks, threads_per_block>>>(
+                thrust::raw_pointer_cast(particle_hashes.data()), 
+                thrust::raw_pointer_cast(cell_start.data()), 
+                thrust::raw_pointer_cast(cell_end.data()), 
+                N
+            );
+
+            //Do neighbor search and update forces according to two-body interactions
+            neighbor_search_kernel<<<num_blocks, threads_per_block>>>(
+                thrust::raw_pointer_cast(positions.data()),
+                thrust::raw_pointer_cast(forces.data()),
+                thrust::raw_pointer_cast(chain_indices.data()),
+                // thrust::raw_pointer_cast(particles_idxs.data()),
+                thrust::raw_pointer_cast(forces_x.data()),
+                thrust::raw_pointer_cast(cell_start.data()),
+                thrust::raw_pointer_cast(cell_end.data()),
+                thrust::raw_pointer_cast(particle_hashes.data()),
+                thrust::raw_pointer_cast(num_neighbors.data()),
+                N, grid_size, cutoff_squared, ds, 1.0, 1.0, lambda, shiftrep, expn, gammam
+            );
+
+            cudaDeviceSynchronize();
+
+        }
+
+        //Update elastic forces between two consecutive particles: first need to resort array
+        elastic_force<<<num_blocks, threads_per_block>>>(
+            thrust::raw_pointer_cast(positions.data()),
+            thrust::raw_pointer_cast(chain_indices.data()),
+            thrust::raw_pointer_cast(d_id_to_index.data()),
+            thrust::raw_pointer_cast(elasticforces.data()),
+            kel, req, Dmfactor, N
+        );
+
+        //Update particles positions
+        update_particles<<<num_blocks, threads_per_block>>>(
+            thrust::raw_pointer_cast(positions.data()),
+            thrust::raw_pointer_cast(forces.data()),
+            thrust::raw_pointer_cast(elasticforces.data()),
             N,
             thrust::raw_pointer_cast(random_engines.data()),
             thrust::raw_pointer_cast(random_engines_m.data()),
@@ -417,15 +475,16 @@ int main(int argc, char *argv[])
 
         cudaDeviceSynchronize();
 
-        //Copy data
+        //Copy data. Sort again before saving
+        // thrust::sort_by_key(thrust::device, chain_indices.begin(), chain_indices.end(), positions.begin());
         if(step % t_save == 0){
-            thrust::copy(particles.begin(), particles.end(), save_vectors.begin() + counter * N);
+            CopyArrayToSave<<<num_blocks, threads_per_block>>>(
+                thrust::raw_pointer_cast(save_vectors.data()),
+                thrust::raw_pointer_cast(positions.data()),
+                thrust::raw_pointer_cast(chain_indices.data()),
+                counter * N, N);
             counter += 1;
-            // for(p = 0; p < N; p++){
-            //     save_vectors[counter*Ntsave+p] = particles[p];
-            // }      
         }
-
     };
 
 
@@ -434,7 +493,7 @@ int main(int argc, char *argv[])
 
     printf("Saving data...\n");
     //Particle vector to fetch from device
-    std::vector<particle> save_particles(Nt_save*N);
+    std::vector<float4> save_particles(Nt_save*N);
     //Vector of particle positions to save
     std::vector<float> save_pos(Nt_save*N*4);
 
@@ -442,10 +501,10 @@ int main(int argc, char *argv[])
     thrust::copy(save_vectors.begin(), save_vectors.end(), save_particles.begin());
     for(int ts = 0; ts < counter; ts++){
         for(int i = 0; i < N; i++){
-            save_pos[ts*(N*4)+i*4] = save_particles[ts*(N)+i].pos.x;
-            save_pos[ts*(N*4)+i*4+1] = save_particles[ts*(N)+i].pos.y;
-            save_pos[ts*(N*4)+i*4+2] = save_particles[ts*(N)+i].pos.z;
-            save_pos[ts*(N*4)+i*4+3] = save_particles[ts*(N)+i].m;
+            save_pos[ts*(N*4)+i*4] = save_particles[ts*(N)+i].x;
+            save_pos[ts*(N*4)+i*4+1] = save_particles[ts*(N)+i].y;
+            save_pos[ts*(N*4)+i*4+2] = save_particles[ts*(N)+i].z;
+            save_pos[ts*(N*4)+i*4+3] = save_particles[ts*(N)+i].w;
         }
     }
 

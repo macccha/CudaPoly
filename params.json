@@ -1,7 +1,7 @@
 {
     "saveflag": "NoLJ",
-    "N":4096,
-    "L": 409.6,
+    "N":1024,
+    "L": 102.4,
     "dt": 0.00001,
     "T": 2000,
     "D": 0.5,
@@ -12,12 +12,12 @@
     "expn": -6,
     "kel": 100.0,
     "r0": 0.8,
-    "req": 0.15,
+    "req": 0.3,
     "rd": 30.0,
     "rm": 0.0,
-    "lambdam": 30.0,
-    "gammam": 0.7,
-    "is_epi_dyn": 0.0,
-    "init_epi_value": 1.2,
+    "lambdam": 28.0,
+    "gammam": 15.0,
+    "is_epi_dyn": 1.0,
+    "init_epi_value": 0.5,
     "t_save": 10000
 }

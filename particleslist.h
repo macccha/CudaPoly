@@ -6,6 +6,7 @@
 #include <thrust/adjacent_difference.h>
 #include <thrust/execution_policy.h>
 #include <thrust/binary_search.h>
+#include <thrust/gather.h>
 #include <iostream>
 #include <cmath>
 #include <fstream>
@@ -16,11 +17,10 @@
 const float ppi = 3.14159265358979323846;
 //System geometry variables
 const int grid_size = 100;
-const float b = 6.0f;
-const float cutoffb = 1/sqrtf(6);
-const float cutoff_rep = 0.408248290464f;
-const float cutoff = 1.0f;
-const float cell_size = 1.0f;
+const float b = 40.0f;
+const float cutoff_rep = 0.15811388300841897f;//0.408248290464f;
+const float cutoff = 0.35f; //1.0f;
+const float cell_size = 0.35f; //1.0f;
 const float cutoff_squared = cutoff * cutoff;
 const float box_size = grid_size* cell_size;
 
@@ -155,25 +155,26 @@ void setCellStartEnd(int* cell_start, int* cell_end, const int N) {
 
 // Kernel that calculates the hashes for particles given grid and cell size
 __global__ 
-void calculateParticleHashes(particle *particles, int*hashes, const int grid_size, const float cell_size, const int N) {
+void calculateParticleHashes(float4 *positions, int*hashes, const int grid_size, const float cell_size, const int N) {
     
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
-    particle &p = particles[idx];
-    int cell_x = static_cast<int>(p.pos.x / cell_size);
-    int cell_y = static_cast<int>(p.pos.y / cell_size);
-    int cell_z = static_cast<int>(p.pos.z / cell_size);
+    float4 &pos = positions[idx];
+    int cell_x = static_cast<int>(pos.x / cell_size);
+    int cell_y = static_cast<int>(pos.y / cell_size);
+    int cell_z = static_cast<int>(pos.z / cell_size);
     hashes[idx] = cell_x + grid_size * (cell_y + grid_size * cell_z);
 }
 
-// Kernel that calculates the particle indices according to the chain order
-__global__ 
-void calculateParticleChainIndices(particle *particles, unsigned int*indices, const int N) {
+
+// Kernel that maps particle chain indices to array position indices
+__global__ void MapChainIDToIndex(unsigned int* chain_indices, unsigned int* d_map, int N) {
     
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
-    particle &p = particles[idx];
-    indices[idx] = p.idx_chain;
+    unsigned int idx = blockIdx.x*blockDim.x + threadIdx.x;
+    if (idx < N) {  
+        unsigned int id = chain_indices[idx];
+        d_map[id] = idx;
+    }
 }
 
 // Kernel that calculates in one call the lower and upper bound position of cells
@@ -196,36 +197,48 @@ void findCellStartEnd(const int* hashes, int* cell_start, int* cell_end, const i
 
 // Initialize particles in a Ring
 __global__
-void InitParticlesRing(particle *particles, int N, float L){
+void InitParticlesRing(float4 *positions, float4 *forces, float4 *elasticforces, unsigned int *chain_indices, int N, float L){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
-    particle &p = particles[idx];
+    float4 &pos = positions[idx];
+    float4 &force = forces[idx];
+    float4 &elasticforce = elasticforces[idx];
     float x0 = box_size/2;
     float y0 = box_size/2;
     float z0 = box_size/2;
     float dTheta = 2*ppi/N;
     float R = 0.005/dTheta;
-    p.pos.x = x0+R*cos(2*ppi/N*(idx));
-    p.pos.y = y0+R*sin(2*ppi/N*(idx));
-    p.pos.z = z0;
-    p.force.x = 0.0f;
-    p.force.y = 0.0f;
-    p.force.z = 0.0f;
-    p.forceel.x = 0.0f;
-    p.forceel.y = 0.0f;
-    p.forceel.z = 0.0f;
-    p.m = 0.0f;
-    p.forcem = 0.0f;
-    p.idx_chain = idx;
+    pos.x = x0+R*cos(2*ppi/N*(idx));
+    pos.y = y0+R*sin(2*ppi/N*(idx));
+    pos.z = z0;
+    pos.w = 0.0f;
+    force.x = 0.0f;
+    force.y = 0.0f;
+    force.z = 0.0f;
+    force.w = 0.0f;
+    elasticforce.x = 0.0f;
+    elasticforce.y = 0.0f;
+    elasticforce.z = 0.0f;
+    elasticforce.w = 0.0f;
+    chain_indices[idx] = idx;
 }
 
 // Initialize epigenetic field to fixed configuration
 __global__
-void InitEpiAvg(particle *particles, const int N, const float avg){
+void InitEpiAvg(float4 *positions, const int N, const float avg){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
-    particle &p = particles[idx];
-    p.m = avg;
+    float4& pos = positions[idx];
+    pos.w = avg;
+}
+
+// Initialize epigenetic field to fixed configuration
+__global__
+void CopyArrayToSave(float4 *save_vector, const float4 *positions, const unsigned int *chain_indices, const int start, const int N){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    int index_copy = chain_indices[idx];
+    save_vector[index_copy+start] = positions[idx];
 }
 
 
@@ -268,6 +281,18 @@ inline float distance_squared(const particle &a, const particle &b) {
     return dx * dx + dy * dy + dz * dz;
 };
 
+//Function for float4 vectors to calculate distance
+__device__
+inline float distance_squared_float4(const float4 &a, const float4 &b) {
+    float dx = a.x - b.x;
+    dx  -= box_size*round(dx/box_size);
+    float dy = a.y - b.y;
+    dy  -= box_size*round(dy/box_size);
+    float dz = a.z - b.z;
+    dz  -= box_size*round(dz/box_size);
+    return dx * dx + dy * dy + dz * dz;
+};
+
 __device__
 inline float distance_squared_v(const float3 &a) {
     float dx = a.x;
@@ -279,59 +304,50 @@ inline float distance_squared_v(const float3 &a) {
     return dx * dx + dy * dy + dz * dz;
 };
 
+//Function to calculate force module
 __device__
 inline float force_module(const float A, const float distance, const float lambda, const float exponent, const float shift){
     
-    if distance > 0.05
-        float inverse = 1/(distance+shift);
-        inverse = inverse*inverse-b;
-        // inverse = inverse;
-        return inverse;
-    else
-        float inverse = 500.0;
-        return inverse;
+    // if(distance > 0.05){
+    //     float inverse = 1/(distance+shift);
+    //     inverse = inverse*inverse-b;
+    //     // inverse = inverse;
+    //     return inverse;
+    // }
+    // else{
+    //     float inverse = 500.0;
+    //     return inverse;
+    // }
+    float inverse = 1/(distance+shift);
+    inverse = inverse*inverse-b;
+    return inverse;
+        
 }
 
-//Function to reset forces
-__global__
-void reset_forces(particle *particles, const int N){
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= (N)) return;
-
-    particle& p = particles[idx];
-    
-    //Reset forces
-    p.forcem = 0.0f;
-    p.force.x = 0.0f;
-    p.force.y = 0.0f;
-    p.force.z = 0.0f;
-}
 
 //Search kernel function
 __global__
-void neighbor_search_kernel(particle *particles, float *forces_x, int *cell_start, int *cell_end, int *particle_hashes,int *num_neighbors,  const int N, const int grid_size, const float cutoff_squared, const float ds, float rep, const float A, const float lambda, const float shiftrep, const int expn, const float gamma) {
+void neighbor_search_kernel(const float4 *positions, float4 *forces, unsigned int *chain_indices, float *forces_x, int *cell_start, int *cell_end, int *particle_hashes,int *num_neighbors,  const int N, const int grid_size, const float cutoff_squared, const float ds, float rep, const float A, const float lambda, const float shiftrep, const int expn, const float gamma) {
     
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (N)) return;
 
     // // Get particle index from list of indices
-    // int p_idx = particles_idxs[idx];
-    // Get particle
-    particle& p = particles[idx];
+    int p_idx = chain_indices[idx];
+    // Get particle position, force and chain index
+    const float4& pos = positions[idx];
+    float4& force = forces[idx];
 
     //Reset forces
-    p.forcem = 0.0f;
-    p.force.x = 0.0f;
-    p.force.y = 0.0f;
-    p.force.z = 0.0f;
+    force.x = 0.0f;
+    force.y = 0.0f;
+    force.z = 0.0f;
+    force.w = 0.0f;
     
-    // Get the current particle's cell
-    // int hash = particle_hashes[idx];
-
     // Get integer coordinates of particle
-    int c_x = static_cast<int>(p.pos.x / cell_size);
-    int c_y = static_cast<int>(p.pos.y / cell_size);
-    int c_z = static_cast<int>(p.pos.z / cell_size);
+    int c_x = static_cast<int>(pos.x / cell_size);
+    int c_y = static_cast<int>(pos.y / cell_size);
+    int c_z = static_cast<int>(pos.z / cell_size);
 
     // Check nearby cells in a 3x3x3 neighborhood
     for (int dz = -1; dz <= 1; dz++) {
@@ -351,17 +367,14 @@ void neighbor_search_kernel(particle *particles, float *forces_x, int *cell_star
                 // Exclude cases of empty or single-cell cells
                 if (start == -1 || end == -1) continue;
 
-                int idx_neigh = 0;
-
                 for (int j = start; j < end; j++) {
                     
                     
-                    particle &neighbor = particles[j];
-                    float distance = sqrtf(distance_squared(p, neighbor));
-                    int p_idx = p.idx_chain;
-                    int idx_neigh = neighbor.idx_chain;
+                    const float4& neighbor = positions[j];
+                    float distance = sqrtf(distance_squared_float4(pos, neighbor));
+                    int idx_neigh = chain_indices[j];
 
-                    if(distance != 0 && distance <= cutoff_squared){
+                    if(distance != 0 && distance <= cutoff){
 
                         // Forces moduli
                         float force_mod = 0.0f;
@@ -369,7 +382,7 @@ void neighbor_search_kernel(particle *particles, float *forces_x, int *cell_star
                         if(distance<cutoff_rep){
                             repulsive_force_mod = ds*A*force_module(A,distance,-6.0,-expn-1,shiftrep);
                         }
-                        float attractive_force_mod = lambda*rep*ds*gamma*exp(lambda*distance)*neighbor.m*p.m; // Attractive force;
+                        float attractive_force_mod = lambda*rep*ds*gamma*exp(lambda*distance)*neighbor.w*pos.w; // Attractive force;
 
                         // Add attractive and repulsive forces only among non-nearest neighbors neighbors
                         if(p_idx != N-1 && p_idx != 0 && p_idx != (idx_neigh - 1) && (p_idx != idx_neigh + 1)){
@@ -383,10 +396,10 @@ void neighbor_search_kernel(particle *particles, float *forces_x, int *cell_star
                         }
 
                         //Update force
-                        p.force.x += force_mod*(p.pos.x-neighbor.pos.x)/distance;
-                        p.force.y += force_mod*(p.pos.y-neighbor.pos.y)/distance;
-                        p.force.z += force_mod*(p.pos.z-neighbor.pos.z)/distance;
-                        p.forcem += ds*gamma*exp(lambda*distance)*neighbor.m;
+                        force.x += force_mod*(pos.x-neighbor.x)/distance;
+                        force.y += force_mod*(pos.y-neighbor.y)/distance;
+                        force.z += force_mod*(pos.z-neighbor.z)/distance;
+                        force.w += ds*gamma*exp(lambda*distance)*neighbor.w;
 
                     }
                     
@@ -396,90 +409,12 @@ void neighbor_search_kernel(particle *particles, float *forces_x, int *cell_star
     }
 
     // Save force
-    forces_x[idx] = p.forcem;
-};
-
-//Search kernel function
-__global__
-void neighbor_search_kernel_noidxs(particle *particles, float *forces_x, int *cell_start, int *cell_end, int *particle_hashes,int *num_neighbors,  const int N, const int grid_size, const float cutoff_squared, const float ds, float rep, const float A, const float lambda, const float shiftrep, const int expn, const float gamma) {
-    
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= (N)) return;
-
-    // Get particle
-    particle& p = particles[idx];
-    
-    // Get the current particle's cell
-    int hash = particle_hashes[idx];
-    int c_x = static_cast<int>(p.pos.x / cell_size);
-    int c_y = static_cast<int>(p.pos.y / cell_size);
-    int c_z = static_cast<int>(p.pos.z / cell_size);
-
-    //Define distance, distance vector and force modulus
-    float distance_sq = 0.0f;
-    float distance = 0.0f;
-    float3 distance_vec = make_float3(0.0f,0.0f,0.0f);
-    float force_mod = 0.0f;
-    float attractive_force_mod = 0.0f;
-    float repulsive_force_mod = 0.0f;
-
-    //Check nearby cells in a 3x3x3 neighborhood
-    for (int dz = -1; dz <= 1; dz++) {
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
-                
-                int n_x = pmod(c_x+dx,grid_size);
-                int n_y = pmod(c_y+dy,grid_size);
-                int n_z = pmod(c_z+dz,grid_size);
-
-                int neighbor_hash = n_x + grid_size * (n_y + grid_size * n_z);
-
-                // Check the range of particles in this cell
-                int start = cell_start[neighbor_hash];
-                int end = cell_end[neighbor_hash];
-
-                if (start == -1 || end == -1) continue;
-
-                for (int j = start; j < end; j++) {
-                    
-                                            
-                        //Get neighbor
-                        particle& neighbor = particles[j];
-                        float distance = sqrtf(distance_squared(p, neighbor));
-                        if(distance!=0.0){
-                        
-
-                            if (distance <= cutoff) //Calculate only if in radius of interaction
-                            {
-                                // //Update distance vector
-                                distance_vec.x = p.pos.x-neighbor.pos.x;
-                                distance_vec.y = p.pos.y-neighbor.pos.y;
-                                distance_vec.z = p.pos.z-neighbor.pos.z;
-
-                                attractive_force_mod = lambda*rep*ds*gamma*exp(lambda*distance)*neighbor.m*p.m; // Attractive force;
-                                repulsive_force_mod = ds*A*force_module(A,distance,-2.0,-expn-1,shiftrep);
-
-                                // Add attractive force only among non-nearest neighbors neighbors
-                                force_mod = repulsive_force_mod; // Repulsive force
-                                force_mod += attractive_force_mod;
-                                p.force.x += force_mod*distance_vec.x/distance;
-                                p.force.y += force_mod*distance_vec.y/distance;
-                                p.force.z += force_mod*distance_vec.z/distance;
-                                p.forcem += ds*gamma*exp(lambda*distance)*neighbor.m;
-                            }
-                    }
-                    
-                }
-            }
-        }
-    }
-    forces_x[idx] = p.force.x;
-
+    forces_x[idx] = force.w;
 };
 
 
 __global__
-void update_particles(particle *particles,  int N, thrust::random::default_random_engine* engines, thrust::random::default_random_engine* engines_m, thrust::random::normal_distribution<float>* ndists, thrust::random::normal_distribution<float>* ndists_m, const float dt, const float D, const float lambda, const float rd, const float rm, const float dtnoise, const float epiev)
+void update_particles(float4 *positions, const float4 *forces, const float4 *elasticforces,  int N, thrust::random::default_random_engine* engines, thrust::random::default_random_engine* engines_m, thrust::random::normal_distribution<float>* ndists, thrust::random::normal_distribution<float>* ndists_m, const float dt, const float D, const float lambda, const float rd, const float rm, const float dtnoise, const float epiev)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (N)) return;
@@ -490,67 +425,76 @@ void update_particles(particle *particles,  int N, thrust::random::default_rando
     thrust::random::normal_distribution<float>& distr = ndists[idx];
     thrust::random::normal_distribution<float>& distrm = ndists_m[idx];
 
-    particle& p = particles[idx];
+    float4& pos = positions[idx];
+    const float4& force = forces[idx];
+    const float4 &elasticforce = elasticforces[idx];
     eng.discard(idx);
     engm.discard(idx);
 
     //Evolve according to Langevin equation
-    p.pos.x += dt*(p.force.x+p.forceel.x) + dtnoise*distr(eng);
-    p.pos.y += dt*(p.force.y+p.forceel.y) + dtnoise*distr(eng);
-    p.pos.z += dt*(p.force.z+p.forceel.z) + dtnoise*distr(eng);
+    pos.x += dt*(force.x+elasticforce.x) + dtnoise*distr(eng);
+    pos.y += dt*(force.y+elasticforce.y) + dtnoise*distr(eng);
+    pos.z += dt*(force.z+elasticforce.z) + dtnoise*distr(eng);
 
-    p.pos.x = wrap_float(p.pos.x, box_size);
-    p.pos.y = wrap_float(p.pos.y, box_size);
-    p.pos.z = wrap_float(p.pos.z, box_size);
+    pos.x = wrap_float(pos.x, box_size);
+    pos.y = wrap_float(pos.y, box_size);
+    pos.z = wrap_float(pos.z, box_size);
 
-    p.m += epiev*(dt*(p.forcem - rd*p.m + rm - lambda*p.m*p.m*p.m-p.m*p.m*p.m*p.m*p.m) + dtnoise*distr(eng));
+    pos.w += epiev*(dt*(force.w + elasticforce.w - rd*pos.w + rm - lambda*pos.w*pos.w*pos.w-pos.w*pos.w*pos.w*pos.w*pos.w) + dtnoise*distr(eng));
 
 };
 
 // Calculate elastic force
 __global__
-void elastic_force(particle *particles, const float kel, const float r0, const int N){
+void elastic_force(const float4 *positions, unsigned int* chain_indices, unsigned int* d_id_to_index, float4 *elasticforces, const float kel, const float r0, const float Dmfactor, const int N){
     
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (N)) return;
     
     //Define geometric variables
-    particle& p = particles[idx];
-    int idx_prev = 0;
-    int idx_forw = 0;
+    const float4& pos = positions[idx];
+    float4& elasticforce = elasticforces[idx];
+    unsigned int idx_curr = chain_indices[idx];
+    unsigned int idx_prev = 0;
+    unsigned int idx_forw = 0;
     
     //Get indices of previous and next particle on the chain
-    if (idx == 0){
+    if (idx_curr == 0){
         idx_prev = N-1;
     }
     else{
-        idx_prev = idx-1;
+        idx_prev = idx_curr-1;
     }
-    if(idx == N-1){
+    if(idx_curr == N-1){
         idx_forw = 0;
     }
     else{
-        idx_forw = idx+1;
+        idx_forw = idx_curr+1;
     }
 
+    
+    unsigned int vec_idx_prev = d_id_to_index[idx_prev];
+    unsigned int vec_idx_forw = d_id_to_index[idx_forw];
     // Get nearest neighbor particles
-    particle& neigh_prev = particles[idx_prev];
-    particle& neigh_forw = particles[idx_forw];
+    const float4& neigh_prev = positions[vec_idx_prev];
+    const float4& neigh_forw = positions[vec_idx_forw];
     //Calculate distances of nearest neighbours
-    float3 vecprev = make_float3(p.pos.x-neigh_prev.pos.x,p.pos.y-neigh_prev.pos.y,p.pos.z-neigh_prev.pos.z);
-    float3 vecforw = make_float3(p.pos.x-neigh_forw.pos.x,p.pos.y-neigh_forw.pos.y,p.pos.z-neigh_forw.pos.z);
+    float3 vecprev = make_float3(pos.x-neigh_prev.x,pos.y-neigh_prev.y,pos.z-neigh_prev.z);
+    float3 vecforw = make_float3(pos.x-neigh_forw.x,pos.y-neigh_forw.y,pos.z-neigh_forw.z);
     float distprev = sqrtf(distance_squared_v(vecprev));
     float distforw = sqrtf(distance_squared_v(vecforw));
     float coeffprev = (distprev-r0)/distprev;
     float coeffforw = (distforw-r0)/distforw;
 
     //Calculate elastic force
-    p.forceel.x = -kel*(vecprev.x)*coeffprev;
-    p.forceel.y = -kel*(vecprev.y)*coeffprev;
-    p.forceel.z = -kel*(vecprev.z)*coeffprev;
-    p.forceel.x -= kel*(vecforw.x)*coeffforw;
-    p.forceel.y -= kel*(vecforw.y)*coeffforw;
-    p.forceel.z -= kel*(vecforw.z)*coeffforw;
+    elasticforce.x = -kel*(pos.x-neigh_prev.x)*coeffprev;
+    elasticforce.y = -kel*(pos.y-neigh_prev.y)*coeffprev;
+    elasticforce.z = -kel*(pos.z-neigh_prev.z)*coeffprev;
+    elasticforce.x -= kel*(pos.x-neigh_forw.x)*coeffforw;
+    elasticforce.y -= kel*(pos.y-neigh_forw.y)*coeffforw;
+    elasticforce.z -= kel*(pos.z-neigh_forw.z)*coeffforw;
+    //Laplacian calculation for scalar field
+    elasticforce.w = Dmfactor*(-2*pos.w+neigh_prev.w+neigh_forw.w);
 
 
 };
