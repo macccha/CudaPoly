@@ -3,8 +3,11 @@ OptFlag := -O3
 CudaCC := nvcc
 objects := polydyn.o polydynOpt.o
 
-$(objects): mainc.cu particleslist.h
+$(objects): mainc.cu particleslist.h gaussian_ring_init.h perturbations.h forces.h adaptive_time_step.h
 	$(CudaCC) -I$(jsonInclude) -c mainc.cu -o $@
+
+polydynTest.o: mainc_test.cu particleslist_test.h gaussian_ring_init.h perturbations.h forces.h adaptive_time_step.h
+	$(CudaCC) -I$(jsonInclude) -c mainc_test.cu -o $@
 
 polydyn: polydyn.o
 	$(CudaCC) $< -o $@

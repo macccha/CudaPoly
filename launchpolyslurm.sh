@@ -3,13 +3,14 @@
 #SBATCH --ntasks=1  # number of processor cores (i.e. tasks)
 #SBATCH --partition=graphic
 #SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=single:1
 
 ##medium 2-00:00:00
 ##short 02:00:00
 ##long 14-00:00:00
 
 #SBATCH --cpus-per-task=1
-#SBATCH --mem-per-cpu=120G
+#SBATCH --mem-per-cpu=4G
 
 # If you so choose Slurm will notify you when certain events happen for your job 
 # for a full list of possible options look furhter down
@@ -47,10 +48,11 @@ mkdir -p $scratch
 cd $project
 
 #Make executable
-srun make polydyn
+make polydyn
 
 #Run without output buffering for real time output
-srun --unbuffered ./polydyn run
+echo "Running $SLURM_ARRAY_TASK_ID job."
+srun --unbuffered ./polydyn run $SLURM_ARRAY_TASK_ID
 
 # Clean up after yourself
 cd
