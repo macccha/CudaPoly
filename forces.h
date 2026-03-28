@@ -15,20 +15,33 @@ inline float force_module(const float A, const float distance, const float lambd
 __device__
 inline float wca_force_mod(float dist_sq, float sigma, float epsilon) {
     
-    // Only active below 2^(1/6) * sigma ≈ 1.1224 * sigma
-    float sigma_sq = sigma * sigma;
-    if (dist_sq >= 1.2599f * sigma_sq) return 0.0f;  // 2^(1/3) * sigma^2
-    float sr2  = sigma_sq / dist_sq;
-    float sr6  = sr2 * sr2 * sr2;
-    float sr12 = sr6 * sr6 * sr2;
-    // Magnitude of force: 48*eps*(sr12 - 0.5*sr6) / dist_sq
-    // (already divided by r, ready to multiply by displacement components)
-    return 48.0f * epsilon * (sr12 - 0.5f * sr6);
+        // Only active below 2^(1/6) * sigma ≈ 1.1224 * sigma
+        float sigma_sq = sigma * sigma;
+        if (dist_sq >= 1.25992105f * sigma_sq) return 0.0f;  // 2^(1/3) * sigma^2
+        float sr2  = sigma_sq / dist_sq;
+        float sr6  = sr2 * sr2 * sr2;
+        float sr12 = sr6 * sr6 * sr2;
+        // Magnitude of force: 48*eps*(sr12 - 0.5*sr6) / dist_sq
+        // (already divided by r, ready to multiply by displacement components)
+        return 48.0f * epsilon * (sr12 - 0.5f * sr6);
+
+}
+
+//Function to calculate soft repulsive force module
+__device__
+inline float soft_rep_mod(float dist, float sigma, float epsilon) {
+    
+        // Only active below 2^(1/6) * sigma ≈ 1.1224 * sigma
+        float d_c = 1.12246204831 * sigma;
+        if (dist >= d_c) return 0.0f;  // 2^(1/3) * sigma^2
+        return epsilon*sinf(ppi*dist/sigma);
+
 }
 
 //Search kernel function
 __global__
-void neighbor_search_kernel(const float4 *positions, float4 *forces, unsigned int *chain_indices, float *forces_x, int *cell_start, int *cell_end, int *particle_hashes,int *num_neighbors,
+void neighbor_search_kernel(const int mode,
+                            const float4 *positions, float4 *forces, unsigned int *chain_indices, float *forces_x, int *cell_start, int *cell_end, int *particle_hashes,int *num_neighbors,
                             const int N, const int grid_size, const float cutoff_squared,
                             const float ds, float rep, const float A, const float lambda, const float shiftrep, const int expn, const float gamma)
 {
@@ -74,6 +87,7 @@ void neighbor_search_kernel(const float4 *positions, float4 *forces, unsigned in
                 for (int j = start; j < end; j++) {
                     
                     if(j != idx){
+                        
                         const float4& neighbor = positions[j];
                         float distance_sq = (distance_squared_float4(pos, neighbor));
                         int idx_neigh = chain_indices[j];
@@ -84,21 +98,19 @@ void neighbor_search_kernel(const float4 *positions, float4 *forces, unsigned in
 
 
                         // Force calculation on beads happens only for non-nearest neighbor beads
-                        if (!are_bonded && distance_sq <= cutoff_squared && distance_sq > 0) {
+                        if (!are_bonded && distance_sq <= cutoff_squared && distance_sq > 0.00005f) {
 
                             float distance = sqrtf(distance_sq);
                             // float rep_mod = ds*A*force_module(A,distance,-6.0,-expn-1,shiftrep);
-                            float rep_mod = ds*wca_force_mod(distance_sq, A, expn);
+                            float rep_mod = mode == 1 ? ds*soft_rep_mod(distance, A, 30) : ds*wca_force_mod(distance_sq, A, expn);
                             if(isnan(rep_mod)){
-                                printf("Force is NaN. \n");
+                                printf("Force is NaN, because distance is %f. \n", distance);
                             }
                             float att_mod = rep * ds * gamma * lambda * expf(lambda * distance) * neighbor.w * pos.w;
-                            // float att_mod = rep * ds * (-gamma) * 1/(distance_sq) * neighbor.w * pos.w;
 
-
-                            force.x += rep_mod*(pos.x-neighbor.x) + att_mod*(pos.x-neighbor.x)/distance;
-                            force.y += rep_mod*(pos.y-neighbor.y) + att_mod*(pos.y-neighbor.y)/distance;
-                            force.z += rep_mod*(pos.z-neighbor.z) + att_mod*(pos.z-neighbor.z)/distance;
+                            force.x += (rep_mod+att_mod)*((pos.x-neighbor.x)/distance);
+                            force.y += (rep_mod+att_mod)*((pos.y-neighbor.y)/distance);
+                            force.z += (rep_mod+att_mod)*((pos.z-neighbor.z)/distance);
                             force.w += ds * gamma * expf(lambda * distance) * neighbor.w;
                         
                         }
@@ -128,9 +140,10 @@ inline void ComputeNonBondedForces(
     const int N, const int num_blocks, const int threads_per_block,
     const float ds, const float rep,
     const float A, const float lambda,
-    const float shiftrep, const int expn, const float gammam)
+    const float shiftrep, const int expn, const float gammam,
+    const int mode)
 {
-    neighbor_search_kernel<<<num_blocks, threads_per_block>>>(
+    neighbor_search_kernel<<<num_blocks, threads_per_block>>>(mode,
         thrust::raw_pointer_cast(positions.data()),
         thrust::raw_pointer_cast(forces.data()),
         thrust::raw_pointer_cast(chain_indices.data()),

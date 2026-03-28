@@ -1,14 +1,15 @@
-#include "particleslist.h"
-#include "forces.h"
-#include "adaptive_time_step.h"
-#include "verlet_skin.h"   // must come after particleslist.h, relies on box_size
-#include "perturbations.h"
-#include "gaussian_ring_init.h"
-#include <nlohmann/json.hpp>
 #include <iostream>
 #include <fstream>
 #include <string>
 #include <sstream>
+#include "particleslist.h"
+#include "forces.h"
+#include "adaptive_time_step.h"
+// #include "verlet_skin.h"   // must come after particleslist.h, relies on box_size
+#include "perturbations.h"
+#include "gaussian_ring_init.h"
+#include <nlohmann/json.hpp>
+
 
 using namespace std;
 using json = nlohmann::json;
@@ -73,7 +74,7 @@ int main(int argc, char *argv[])
     const float req = params["req"];
     // Parameters for dynamics of epigenetic fields
     const float rd = params["rd"]; // De-methylation rate
-    const float rm = params["rm"]; // Methylation rate
+    float rm = params["rm"]; // Methylation rate
     const float lambdam = params["lambdam"]; // Quartic interaction
     const float gammam = params["gammam"]; // Polymer-epigenetic field interaction
     const float Dm = params["Dm"]; //Laplacian prefactor for scalar field
@@ -88,9 +89,13 @@ int main(int argc, char *argv[])
     //PI constant
     const float pi = 3.14159265358979323846;
 
+    //Define counter for particle interaction calculations
+    const int steps_list_calc = params["steps_list_calc"];
+    int step_list_cal = steps_list_calc-1;
+
     // Get skin parameter for Verlet Skin algorithm
-    const float skin = params["skin"]; 
-    const float skin_trigger_sq = (skin/2.0f) * (skin/2.0f);  // Rebuild if max disp > skin/2
+    // const float skin = params["skin"]; 
+    // const float skin_trigger_sq = (skin/2.0f) * (skin/2.0f);  // Rebuild if max disp > skin/2
 
     printf("-------------------------------------- \n");
 
@@ -205,6 +210,7 @@ int main(int argc, char *argv[])
     // }
 
     printf("Evolve as Gaussian...\n");
+    
     // First evolve as Gaussian chain
     // Note: at beginning, particles are ordered according to their position along the chain
     
@@ -257,19 +263,23 @@ int main(int argc, char *argv[])
     
     while(t_current <= 0.4f*T){
         
-        // Update snapshot to calculate displacement from last snapshot
-        float max_disp_sq = ComputeMaxDisplacementSqThrust(
-            thrust::raw_pointer_cast(positions.data()),
-            thrust::raw_pointer_cast(positions_snapshot.data()),
-            N);
+        // // Update snapshot to calculate displacement from last snapshot
+        // float max_disp_sq = ComputeMaxDisplacementSqThrust(
+        //     thrust::raw_pointer_cast(positions.data()),
+        //     thrust::raw_pointer_cast(positions_snapshot.data()),
+        //     N);
 
-        if(max_disp_sq > skin_trigger_sq){
+        step_list_cal += 1;
+
+        if(step_list_cal % steps_list_calc == 0){
+            
+            step_list_cal = 0;
             
             // Take new snapshot
-            SnapshotPositions<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(positions.data()),
-                thrust::raw_pointer_cast(positions_snapshot.data()),
-                N);
+            // SnapshotPositions<<<num_blocks, threads_per_block>>>(
+            //     thrust::raw_pointer_cast(positions.data()),
+            //     thrust::raw_pointer_cast(positions_snapshot.data()),
+            //     N);
 
             // Rebuild neighboring list
             RebuildCellList(positions,
@@ -283,13 +293,13 @@ int main(int argc, char *argv[])
                             cell_end,
                             N, num_blocks, threads_per_block);
 
-        }
-
-        // Update non-bonded forces
-        ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
+            // Update non-bonded forces
+            ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
                        cell_start, cell_end, forces_x, num_neighbors,
                        N, num_blocks, threads_per_block,
-                       ds, rep, A, lambda, shiftrep, expn, gammam);
+                       ds, rep, A, lambda, shiftrep, expn, gammam, 1);
+
+        }
 
         //Update elastic forces between two consecutive particles: first need to resort array
         elastic_force<<<num_blocks, threads_per_block>>>(
@@ -335,35 +345,39 @@ int main(int argc, char *argv[])
 
     if(is_epi_dyn == 1.0){
         printf("Current time is %f. Starting polymer evolution...\n", t_current);
+        // rm = 20.0f; // Activate external field
     }
     else{
         printf("Current time is %f. Equilibrating polymer with constant field...\n", t_current);
+        //Initialize epigentic field to certain average
+        InitEpiAvg<<<num_blocks, threads_per_block>>>(thrust::raw_pointer_cast(positions.data()), N, init_epi_value);
     }
     
 
     //Set rep to correct value
     rep = 1.0;//pi*A;
 
-    //Initialize epigentic field to certain average
-    InitEpiAvg<<<num_blocks, threads_per_block>>>(thrust::raw_pointer_cast(positions.data()), N, init_epi_value);
-
     //Equilibrate polymer with certain fixed methylation average
     while(t_current <= 0.6f*T){
         
-        // Update snapshot to calculate displacement from last snapshot
-        float max_disp_sq = ComputeMaxDisplacementSqThrust(
-            thrust::raw_pointer_cast(positions.data()),
-            thrust::raw_pointer_cast(positions_snapshot.data()),
-            N);
+        // // Update snapshot to calculate displacement from last snapshot
+        // float max_disp_sq = ComputeMaxDisplacementSqThrust(
+        //     thrust::raw_pointer_cast(positions.data()),
+        //     thrust::raw_pointer_cast(positions_snapshot.data()),
+        //     N);
 
-        if(max_disp_sq > skin_trigger_sq){
+        step_list_cal += 1;
+
+        if(step_list_cal % steps_list_calc == 0){
+            
+            step_list_cal = 0;
             
             // Take new snapshot
-            SnapshotPositions<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(positions.data()),
-                thrust::raw_pointer_cast(positions_snapshot.data()),
-                N);
-            
+            // SnapshotPositions<<<num_blocks, threads_per_block>>>(
+            //     thrust::raw_pointer_cast(positions.data()),
+            //     thrust::raw_pointer_cast(positions_snapshot.data()),
+            //     N);
+
             // Rebuild neighboring list
             RebuildCellList(positions,
                             positions_dup,
@@ -376,13 +390,13 @@ int main(int argc, char *argv[])
                             cell_end,
                             N, num_blocks, threads_per_block);
 
-        }
-
-        // Update non-bonded forces
-        ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
+            // Update non-bonded forces
+            ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
                        cell_start, cell_end, forces_x, num_neighbors,
                        N, num_blocks, threads_per_block,
-                       ds, rep, A, lambda, shiftrep, expn, gammam);
+                       ds, rep, A, lambda, shiftrep, expn, gammam, 0);
+
+        }
 
         //Update elastic forces between two consecutive particles: first need to resort array
         elastic_force<<<num_blocks, threads_per_block>>>(
@@ -412,7 +426,7 @@ int main(int argc, char *argv[])
             N,
             thrust::raw_pointer_cast(random_engines.data()),
             thrust::raw_pointer_cast(normal_distrs.data()),
-            dt_adaptive, D, lambdam, rd, rm, dtnoise_adaptive, is_epi_dyn
+            dt_adaptive, D, lambdam, rd, rm, dtnoise_adaptive, is_epi_dyn*epi_scale
         );
 
         //Copy data. Sort again before saving
@@ -439,22 +453,28 @@ int main(int argc, char *argv[])
         is_epi_dyn = 1.0f;
     }
 
+    rm = 0.0f;
+
     //Evolve as interacting walk
     while(t_current <= T){
         
-        // Update snapshot to calculate displacement from last snapshot
-        float max_disp_sq = ComputeMaxDisplacementSqThrust(
-            thrust::raw_pointer_cast(positions.data()),
-            thrust::raw_pointer_cast(positions_snapshot.data()),
-            N);
+        // // Update snapshot to calculate displacement from last snapshot
+        // float max_disp_sq = ComputeMaxDisplacementSqThrust(
+        //     thrust::raw_pointer_cast(positions.data()),
+        //     thrust::raw_pointer_cast(positions_snapshot.data()),
+        //     N);
 
-        if(max_disp_sq > skin_trigger_sq){
+        step_list_cal += 1;
+
+        if(step_list_cal % steps_list_calc == 0){
+            
+            step_list_cal = 0;
             
             // Take new snapshot
-            SnapshotPositions<<<num_blocks, threads_per_block>>>(
-                thrust::raw_pointer_cast(positions.data()),
-                thrust::raw_pointer_cast(positions_snapshot.data()),
-                N);
+            // SnapshotPositions<<<num_blocks, threads_per_block>>>(
+            //     thrust::raw_pointer_cast(positions.data()),
+            //     thrust::raw_pointer_cast(positions_snapshot.data()),
+            //     N);
 
             // Rebuild neighboring list
             RebuildCellList(positions,
@@ -467,13 +487,14 @@ int main(int argc, char *argv[])
                             cell_start,
                             cell_end,
                             N, num_blocks, threads_per_block);
-        }
 
-        // Update non-bonded forces
-        ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
+            // Update non-bonded forces
+            ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
                        cell_start, cell_end, forces_x, num_neighbors,
                        N, num_blocks, threads_per_block,
-                       ds, rep, A, lambda, shiftrep, expn, gammam);
+                       ds, rep, A, lambda, shiftrep, expn, gammam, 0);
+
+        }
 
         //Update elastic forces between two consecutive particles: first need to resort array
         elastic_force<<<num_blocks, threads_per_block>>>(
