@@ -136,7 +136,7 @@ int main(int argc, char *argv[])
 
     //Counter for showing progress
     float t_show_progress = 0.1f*T; // Show every 10% of total time
-    float next_show_time = 0.6f*T; // This is the time when the real dynamics start
+    float next_show_time = 40.0f; // This is the time when the real dynamics start
 
     //Define rep for activating attractive part of force
     float rep = 0.0f;
@@ -174,8 +174,16 @@ int main(int argc, char *argv[])
     perturb.load_from_json("params_perturbation.json");
 
     // Set perturbation position at center of chain
-    perturb.chain_position = N/2;
+    perturb.chain_position = N/2+10;
     perturb.print();
+
+    // Initialize random state for perturbation
+    curandState *d_rand_states;
+    cudaMalloc(&d_rand_states, N * sizeof(curandState));
+
+    if(perturb.is_random){
+        init_rand_states<<<num_blocks, threads_per_block>>>(d_rand_states, N, time(NULL));
+    }
 
     printf("-------------------------------------- \n");
 
@@ -214,7 +222,9 @@ int main(int argc, char *argv[])
     // First evolve as Gaussian chain
     // Note: at beginning, particles are ordered according to their position along the chain
     
-    while(t_current <= 0.1f*T){
+    float T1 = 10.0f;
+
+    while(t_current <= T1){
 
         //Update elastic forces between two consecutive particles: first need to resort array
         elastic_force<<<num_blocks, threads_per_block>>>(
@@ -261,7 +271,9 @@ int main(int argc, char *argv[])
     
     // Evolve as self-avoiding walk
     
-    while(t_current <= 0.4f*T){
+    float T2 = T1+30.0f;
+
+    while(t_current <= T2){
         
         // // Update snapshot to calculate displacement from last snapshot
         // float max_disp_sq = ComputeMaxDisplacementSqThrust(
@@ -356,9 +368,10 @@ int main(int argc, char *argv[])
 
     //Set rep to correct value
     rep = 1.0;//pi*A;
+    float T3 = T2 + 40.0f;
 
     //Equilibrate polymer with certain fixed methylation average
-    while(t_current <= 0.6f*T){
+    while(t_current <= T3){
         
         // // Update snapshot to calculate displacement from last snapshot
         // float max_disp_sq = ComputeMaxDisplacementSqThrust(
@@ -394,7 +407,7 @@ int main(int argc, char *argv[])
             ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
                        cell_start, cell_end, forces_x, num_neighbors,
                        N, num_blocks, threads_per_block,
-                       ds, rep, A, lambda, shiftrep, expn, gammam, 0);
+                       ds, rep, A, lambda, shiftrep, expn, 4.0, 0); //Equilibrate collapse at low gamma to allow for contact changes
 
         }
 
@@ -449,7 +462,7 @@ int main(int argc, char *argv[])
     };
 
     if(is_epi_dyn == 0){
-        printf("Evolve. Counter is at %d...\n", counter);
+        printf("Evolve. Counter is at %d. Time is at %f...\n", counter, t_current);
         is_epi_dyn = 1.0f;
     }
 
@@ -513,21 +526,24 @@ int main(int argc, char *argv[])
         t_current += dt_adaptive;
 
         // Check status of perturbation
-        // if( perturb.enabled == true && perturb.is_perturb_finished==false){
-        //     perturb.update(t_current);
-        //     if(perturb.active == true && perturb.is_activated == false){
-        //         printf("Perturbation started at %f. \n", t_current);
-        //         is_epi_dyn = 0.0f;
-        //         perturb_epifield<<<num_blocks, threads_per_block>>>(thrust::raw_pointer_cast(positions.data()),
-        //                          thrust::raw_pointer_cast(d_id_to_index.data()),
-        //                          N, perturb.chain_position, perturb.width, perturb.field_value);
-        //         perturb.is_activated = true;
-        //     }
-        //     if(perturb.is_perturb_finished==true){
-        //         printf("Perturbation finished at %f. \n", t_current);
-        //         is_epi_dyn = 1.0f;
-        //     }
-        // }
+        if( perturb.enabled == true && perturb.is_perturb_finished==false){
+            perturb.update(t_current);
+            if(perturb.active == true && perturb.is_activated == false){
+                printf("Perturbation started at %f. \n", t_current);
+                is_epi_dyn = 0.0f;
+                perturb_epifield<<<num_blocks, threads_per_block>>>(thrust::raw_pointer_cast(positions.data()),
+                                thrust::raw_pointer_cast(d_id_to_index.data()),
+                                N, perturb.chain_position, perturb.width, perturb.field_value,
+                                perturb.is_random,          
+                                perturb.std_random,
+                                d_rand_states);
+                perturb.is_activated = true;
+            }
+            if(perturb.is_perturb_finished==true){
+                printf("Perturbation finished at %f. \n", t_current);
+                is_epi_dyn = 1.0f;
+            }
+        }
 
         // // Check if external induction needs to be activated
         // if(is_external_ind && !is_induction_active && t_current > start_t_induction && t_current < end_t_induction){
@@ -552,7 +568,7 @@ int main(int argc, char *argv[])
             N,
             thrust::raw_pointer_cast(random_engines.data()),
             thrust::raw_pointer_cast(normal_distrs.data()),
-            dt_adaptive, D, lambdam, rd, rm, dtnoise_adaptive, epi_scale
+            dt_adaptive, D, lambdam, rd, rm, dtnoise_adaptive, is_epi_dyn*epi_scale
         );
 
         //Copy data. Sort again before saving
