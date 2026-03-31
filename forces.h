@@ -34,7 +34,7 @@ inline float soft_rep_mod(float dist, float sigma, float epsilon) {
         // Only active below 2^(1/6) * sigma ≈ 1.1224 * sigma
         float d_c = 1.12246204831 * sigma;
         if (dist >= d_c) return 0.0f;  // 2^(1/3) * sigma^2
-        return epsilon*sinf(ppi*dist/sigma);
+        return epsilon*cosf(ppi2*dist/d_c);
 
 }
 

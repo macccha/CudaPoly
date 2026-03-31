@@ -19,12 +19,13 @@
 
 //PI constant
 const float ppi = 3.14159265358979323846;
+const float ppi2 = 1.57079632679;
 //System geometry variables
 const int grid_size = 10;
 const float b = 0.0f; //3333333333333f;
-const float cutoff_rep = 10.0f;//0.408248290464f;
-const float cutoff = 10.0f;
-const float cell_size = 10.0f;
+const float cutoff_rep = 5.0f;//0.408248290464f;
+const float cutoff = 5.0f;
+const float cell_size = 5.0f;
 const float cutoff_squared = cutoff * cutoff;
 const float box_size = grid_size* cell_size;
 const int cell_numbers = grid_size*grid_size*grid_size;
