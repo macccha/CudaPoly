@@ -140,8 +140,16 @@ void perturb_epifield(float4 *positions, const unsigned int *d_id_to_index, cons
     } else {
         // if (idx < chain_position || idx > chain_position + width) return;
         // else positions[particle_idx].w = field_value;
-        float field_at_pos = positions[particle_idx].w;
-        positions[particle_idx].w = field_at_pos < 0 ? field_value : field_at_pos;
+        // float field_at_pos = positions[particle_idx].w;
+        // positions[particle_idx].w = field_value;
+
+        if(idx < 256 || (idx > 512 && idx < 768)){
+            positions[particle_idx].w = field_value;
+        }
+        else{
+            // float sign = (idx & 64) ? -1.0f : 1.0f;
+            positions[particle_idx].w = -field_value;
+        }
     }
 }
 

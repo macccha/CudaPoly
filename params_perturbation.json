@@ -2,9 +2,9 @@
     "enabled": false,
     "is_random": false,
     "std_random": 1.0,
-    "start_time": 100,
-    "duration": 1.0,
-    "field_value": -0.1,
-    "width": 400,
+    "start_time": 150,
+    "duration": 100.0,
+    "field_value": 3.0,
+    "width": 1023,
     "pert_flag": "PertUser"
 }

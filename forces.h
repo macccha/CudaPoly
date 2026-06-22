@@ -1,5 +1,11 @@
 #pragma once
 
+//Sign function
+__device__ __forceinline__ 
+int sign(float x)
+{
+    return (x > 0.0f) - (x < 0.0f);
+}
 
 //Function to calculate repulsive force module: normal power-law scaling
 __device__
@@ -102,7 +108,7 @@ void neighbor_search_kernel(const int mode,
 
                             float distance = sqrtf(distance_sq);
                             // float rep_mod = ds*A*force_module(A,distance,-6.0,-expn-1,shiftrep);
-                            float rep_mod = mode == 1 ? ds*soft_rep_mod(distance, A, 30) : ds*wca_force_mod(distance_sq, A, expn);
+                            float rep_mod = mode == 1 ? ds*soft_rep_mod(distance, A, 100) : ds*wca_force_mod(distance_sq, A, expn);
                             if(isnan(rep_mod)){
                                 printf("Force is NaN, because distance is %f. \n", distance);
                             }
@@ -183,7 +189,7 @@ void update_particles(float4 *positions, const float4 *forces, const float4 *ela
 
     if(epiev != 0.0){
 
-        pos.w = pos.w + epiev*dt*(force.w + elasticforce.w + rm - lambda*pos.w*pos.w*pos.w-pos.w*pos.w*pos.w*pos.w*pos.w) + sqrtf(epiev)*dtnoise*distr(eng);
+        pos.w = pos.w + epiev*dt*(force.w + elasticforce.w + rm*sign(pos.w) - lambda*pos.w*pos.w*pos.w-pos.w*pos.w*pos.w*pos.w*pos.w) + sqrtf(epiev)*dtnoise*distr(eng);
         
         // Implicit modification through rd*pos.w term
         pos.w = pos.w/(1.0f+epiev*dt*rd);

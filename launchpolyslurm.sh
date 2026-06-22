@@ -48,11 +48,11 @@ mkdir -p $scratch
 cd $project
 
 #Make executable
-make polydyn
+make polydynOpt
 
 #Run without output buffering for real time output
 echo "Running $SLURM_ARRAY_TASK_ID job."
-srun --unbuffered ./polydyn run $SLURM_ARRAY_TASK_ID
+srun --unbuffered ./polydynOpt run $SLURM_ARRAY_TASK_ID
 
 # Clean up after yourself
 cd
