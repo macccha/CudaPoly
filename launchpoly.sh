@@ -48,6 +48,6 @@ elif [[ "$MODE" == "slurmarray" ]]; then
         sbatch --time="$TIME" --array=0-$ARRAYS  ./launchpolyslurm.sh
     fi
 else
-   echo "Missing mode of launching. Give as argument either 'test' or 'slurm'."
+   echo "Missing mode of launching. Give as argument either 'test', 'slurm', or 'slurmarray'."
    exit 1
 fi

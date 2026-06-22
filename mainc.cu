@@ -2,10 +2,10 @@
 #include <fstream>
 #include <string>
 #include <sstream>
+#include <random>
 #include "particleslist.h"
 #include "forces.h"
 #include "adaptive_time_step.h"
-// #include "verlet_skin.h"   // must come after particleslist.h, relies on box_size
 #include "perturbations.h"
 #include "gaussian_ring_init.h"
 #include <nlohmann/json.hpp>
@@ -72,6 +72,7 @@ int main(int argc, char *argv[])
     const float r0sq = r0*r0;
     const float r0threshold = r0sq-0.2*r0sq;
     const float req = params["req"];
+    
     // Parameters for dynamics of epigenetic fields
     const float rd = params["rd"]; // De-methylation rate
     float rm = params["rm"]; // Methylation rate
@@ -79,13 +80,16 @@ int main(int argc, char *argv[])
     const float gammam = params["gammam"]; // Polymer-epigenetic field interaction
     const float Dm = params["Dm"]; //Laplacian prefactor for scalar field
     const float Dmfactor = Dm/(ds*ds);
+    
     // Parameters for evolution at constant epigenet field
     float is_epi_dyn = params["is_epi_dyn"]; // Is the epigenetic field fixed?
     const float epi_scale = params["epi_scale"];
     const float init_epi_value = params["init_epi_value"]; // Value of fixed epigenetic field
+    
     //Saving paraneters
     const int t_save = params["t_save"]; //Save every t_save time steps
     const int Nt_save = Tsteps/t_save; //Number of time steps saved
+    
     //PI constant
     const float pi = 3.14159265358979323846;
 
@@ -128,6 +132,23 @@ int main(int argc, char *argv[])
 
     //Initialize vectors to save particle positions, create counter to save
     thrust::device_vector<float4> save_vectors(Nt_save*N);
+
+    //Initialize quantities for Ornstein-Uhlenbeck process
+    printf("Loading params_ou.json. \n");
+    json params_ou;
+    std::ifstream file("./params_ou.json");
+    file >> params_ou;
+    const bool is_ou = params_ou["is_ou"]; //Flag for activation of OU
+    const float ou_tau = params_ou["ou_tau"]; //Time scale of OU
+    const float ou_std = params_ou["out_std"]; // Variance of noise
+    std::vector<float> OU;
+    if(is_ou){
+        printf("Ornstein-Uhlenbeck process activated. \n");
+        printf("Time scale is %f. \n", ou_tau);
+        printf("Noise STD is %f. \n", ou_std);
+        printf("-------------------------------------- \n");
+        OU.resize(Nt_save);
+    }
     
     //Counter for saving
     int counter = 0;
@@ -199,30 +220,30 @@ int main(int argc, char *argv[])
     std::ifstream file_induction("./params_induction.json");
     file_induction >> params_externalinduction;
     bool is_external_ind = params_externalinduction["act_flag"];
-    // float ext_rm = 0.0f;
-    // float start_t_induction = 0.0f;
-    // float end_t_induction = 0.0f;
-    // bool is_induction_active = false;
-    // if(is_external_ind){
-    //     ext_rm = params_externalinduction["ext_rm"];
-    //     start_t_induction = params_externalinduction["start_t_induction"];
-    //     end_t_induction = params_externalinduction["end_t_induction"];
-    //     printf("External induction chosen. \n");
-    //     printf("External field at %f, starting at %f, finishing at %f. \n", ext_rm, start_t_induction, end_t_induction);
-    //     printf("-------------------------------------- \n");
+    float ext_rm = 0.0f;
+    float start_t_induction = 0.0f;
+    float end_t_induction = 0.0f;
+    bool is_induction_active = false;
+    if(is_external_ind){
+        ext_rm = params_externalinduction["ext_rm"];
+        start_t_induction = params_externalinduction["start_t_induction"];
+        end_t_induction = params_externalinduction["end_t_induction"];
+        printf("External induction chosen. \n");
+        printf("External field at %f, starting at %f, finishing at %f. \n", ext_rm, start_t_induction, end_t_induction);
+        printf("-------------------------------------- \n");
 
-    // }
-    // else{
-    //     printf("External induction not enabled. \n");
-    //     printf("-------------------------------------- \n");
-    // }
+    }
+    else{
+        printf("External induction not enabled. \n");
+        printf("-------------------------------------- \n");
+    }
 
     printf("Evolve as Gaussian...\n");
     
     // First evolve as Gaussian chain
     // Note: at beginning, particles are ordered according to their position along the chain
     
-    float T1 = 10.0f;
+    float T1 = 5.0f;
 
     while(t_current <= T1){
 
@@ -260,7 +281,9 @@ int main(int argc, char *argv[])
         if(t_current >= next_save_time){
             thrust::copy(positions.begin(), positions.end(), save_vectors.begin() + counter * N);
             next_save_time += t_save_time;
+             if(is_ou)  OU[counter] = rm;
             counter += 1;
+            
         }
     };
 
@@ -271,7 +294,7 @@ int main(int argc, char *argv[])
     
     // Evolve as self-avoiding walk
     
-    float T2 = T1+30.0f;
+    float T2 = T1+40.0f+is_epi_dyn*20.0f;
 
     while(t_current <= T2){
         
@@ -351,6 +374,7 @@ int main(int argc, char *argv[])
                 thrust::raw_pointer_cast(chain_indices.data()),
                 counter * N, N);
             next_save_time += t_save_time;
+            if(is_ou)  OU[counter] = rm;
             counter += 1;
         }
     };
@@ -450,6 +474,7 @@ int main(int argc, char *argv[])
                 thrust::raw_pointer_cast(chain_indices.data()),
                 counter * N, N);
             next_save_time += t_save_time;
+            if(is_ou)  OU[counter] = rm;
             counter += 1;
         }
 
@@ -467,6 +492,9 @@ int main(int argc, char *argv[])
     }
 
     rm = 0.0f;
+
+    std::mt19937 rng(378632); // Prime number taken from Wikipedia
+    std::normal_distribution<float> normal(0.0f, 1.0f);
 
     //Evolve as interacting walk
     while(t_current <= T){
@@ -546,19 +574,25 @@ int main(int argc, char *argv[])
         }
 
         // // Check if external induction needs to be activated
-        // if(is_external_ind && !is_induction_active && t_current > start_t_induction && t_current < end_t_induction){
-        //     printf("External induction started at at %f. \n", t_current);
-        //     rm = ext_rm;
-        //     is_induction_active = !is_induction_active;
-        // }
-        // else if(is_external_ind && is_induction_active && t_current > end_t_induction){
-        //     printf("External induction finished at at %f. \n", t_current);
-        //     rm = 0.0f;
-        //     is_induction_active = !is_induction_active;
-        // }
+        if(is_external_ind && !is_induction_active && t_current > start_t_induction && t_current < end_t_induction){
+            printf("External induction started at %f. \n", t_current);
+            rm = ext_rm;
+            is_induction_active = !is_induction_active;
+        }
+        else if(is_external_ind && is_induction_active && t_current > end_t_induction){
+            printf("External induction finished at %f. \n", t_current);
+            rm = 0.0f;
+            is_induction_active = !is_induction_active;
+        }
         
         // Set noise time step
         float dtnoise_adaptive = sqrtf(2*D*dt_adaptive);
+
+         // Change external field if OU flag is active
+        if(is_ou){
+            float dtnoise_ou = sqrtf(2*ou_std*dt_adaptive);
+            rm += dt_adaptive*(-ou_tau*rm) + dtnoise_ou*normal(rng);
+        }
 
         //Update particles positions
         update_particles<<<num_blocks, threads_per_block>>>(
@@ -579,6 +613,7 @@ int main(int argc, char *argv[])
                 thrust::raw_pointer_cast(chain_indices.data()),
                 counter * N, N);
             next_save_time += t_save_time;
+            if(is_ou)  OU[counter] = rm;
             counter += 1;
         }
 
@@ -610,6 +645,8 @@ int main(int argc, char *argv[])
             save_pos[ts*(N*4)+i*4+3] = save_particles[ts*(N)+i].w;
         }
     }
+
+    rm = 0.0f;
 
     // Create string with gamma
     std::stringstream stream_gamma;
@@ -648,13 +685,36 @@ int main(int argc, char *argv[])
     std::string ind_flag = is_external_ind ? "ExtInd" : "NoExtInd";
 
 
+    // Folder string
+    std::string folder_str = "/data/others/ciarchi/PolymerDyn/DataSim/";
+    if(is_ou){
+        folder_str+="OU/";
+    }
+
     // Save binary file
-    std::ofstream ofs_particle("/data/others/ciarchi/PolymerDyn/DataSim/particles_"+seed_str+"_"+saveflag+"_"+pert_flag+"_"+ind_flag+"_"+Ntsave_str+"_"+N_str+"_"+gamma_str+"_"+D_str+"_"+rm_str+".bin", std::ios::binary);
+    std::ofstream ofs_particle(folder_str+"particles_"+seed_str+"_"+saveflag+"_"+pert_flag+"_"+ind_flag+"_"+Ntsave_str+"_"+N_str+"_"+gamma_str+"_"+D_str+"_"+rm_str+".bin", std::ios::binary);
 
     // Write particle data
     size_t particle_count = save_pos.size();
     ofs_particle.write(reinterpret_cast<const char*>(save_pos.data()), sizeof(float) * particle_count);
     ofs_particle.close();
+
+    //Write OU data
+    if (is_ou) {
+        // Create string with time scale of OU
+        std::stringstream stream_OUtau;
+        stream_OUtau << std::fixed << std::setprecision(2) << ou_tau;
+        std::string outau_str = stream_OUtau.str();
+        // Create string with noise of OU
+        std::stringstream stream_OUstd;
+        stream_OUstd << std::fixed << std::setprecision(2) << ou_std;
+        std::string oustd_str = stream_OUstd.str();
+
+
+        std::ofstream ofs_ou(folder_str+"ou_"+outau_str+"_"+oustd_str+"_"+seed_str+"_"+saveflag+"_"+pert_flag+"_"+ind_flag+"_"+Ntsave_str+"_"+N_str+"_"+gamma_str+"_"+D_str+"_"+rm_str+".bin", std::ios::binary);
+        ofs_ou.write(reinterpret_cast<const char*>(OU.data()), sizeof(float) * counter);
+        ofs_ou.close();
+    }
 
 
     //End timer

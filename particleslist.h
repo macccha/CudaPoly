@@ -21,7 +21,7 @@
 const float ppi = 3.14159265358979323846;
 const float ppi2 = 1.57079632679;
 //System geometry variables
-const int grid_size = 10;
+const int grid_size = 20;
 const float b = 0.0f; //3333333333333f;
 const float cutoff_rep = 5.0f;//0.408248290464f;
 const float cutoff = 5.0f;

@@ -1,6 +1,6 @@
 {
     "act_flag": false,
-    "ext_rm": 20.0,
-    "start_t_induction": 25.0,
-    "end_t_induction": 35.0
+    "ext_rm": -3.0,
+    "start_t_induction": 100.0,
+    "end_t_induction": 102.0
 }
