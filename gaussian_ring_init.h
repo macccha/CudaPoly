@@ -1,3 +1,5 @@
+//gaussian_ring_init.h
+
 #pragma once
 #include <cuda_runtime.h>
 #include <thrust/device_ptr.h>
@@ -143,12 +145,14 @@ void InitParticlesRW(float4 *positions,
 
 // Initialize epigenetic field to fixed configuration
 __global__
-void InitEpiAvg(float4 *positions, const int N, const float avg)
+void InitEpiAvg(float4 *positions, const int N, const float avg, unsigned int *chain_indices)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
     float4& pos = positions[idx];
-    pos.w = avg;
+    int chain_idx = chain_indices[idx];
+    const float PI = 3.14159265358979323846f;
+    pos.w = avg*sinf(32*PI*chain_idx/1024);
 }
 
 

@@ -1,3 +1,5 @@
+//forces.h
+
 #pragma once
 
 //Sign function
@@ -26,7 +28,7 @@ inline float wca_force_mod(float dist_sq, float sigma, float epsilon) {
         if (dist_sq >= 1.25992105f * sigma_sq) return 0.0f;  // 2^(1/3) * sigma^2
         float sr2  = sigma_sq / dist_sq;
         float sr6  = sr2 * sr2 * sr2;
-        float sr12 = sr6 * sr6 * sr2;
+        float sr12 = sr6 * sr6;
         // Magnitude of force: 48*eps*(sr12 - 0.5*sr6) / dist_sq
         // (already divided by r, ready to multiply by displacement components)
         return 48.0f * epsilon * (sr12 - 0.5f * sr6);
@@ -108,7 +110,7 @@ void neighbor_search_kernel(const int mode,
 
                             float distance = sqrtf(distance_sq);
                             // float rep_mod = ds*A*force_module(A,distance,-6.0,-expn-1,shiftrep);
-                            float rep_mod = mode == 1 ? ds*soft_rep_mod(distance, A, 100) : ds*wca_force_mod(distance_sq, A, expn);
+                            float rep_mod = mode == 1 ? ds*soft_rep_mod(distance, A, 200) : ds*wca_force_mod(distance_sq, A, expn);
                             if(isnan(rep_mod)){
                                 printf("Force is NaN, because distance is %f. \n", distance);
                             }

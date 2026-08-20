@@ -21,7 +21,7 @@ if [[ "$MODE" == "test" ]]; then
     ./polydynOpt test $SEED
 elif [[ "$MODE" == "slurm" ]]; then
     if [[ $# -ne 2 ]]; then
-        echo "Insufficient number of arguments. Arguments must include the time for job run in the formah HH:MM:SS"
+        echo "Wrong number of arguments. Arguments must include the time for job run in the formah HH:MM:SS"
         exit 1
     elif ! [[ "$TIME" =~ ^([0-9]{2}):([0-9]{2}):([0-9]{2})$ ]]; then
         echo "Error: time format must be HH:MM:SS"

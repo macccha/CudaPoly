@@ -1,3 +1,4 @@
+//adaptive_time_step.h
 
 #pragma once
 
@@ -17,7 +18,7 @@ struct ForceMagnitudeFunctor
         float fx = forces[i].x + elasticforces[i].x;
         float fy = forces[i].y + elasticforces[i].y;
         float fz = forces[i].z + elasticforces[i].z;
-        float fw = forces[i].w + elasticforces[i].w;
+        float fw = forces[i].w;
 
         return (fx*fx + fy*fy + fz*fz+ fw*fw);
     }

@@ -1,3 +1,5 @@
+//main.cu
+
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -24,7 +26,7 @@ int main(int argc, char *argv[])
     printf("Running %s mode. \n", argv[1]);
     if(!strcmp(argv[1], "test")){
         printf("Loading params_test.json. \n");
-        std::ifstream file("./params_test.json");
+        std::ifstream file(argv[3]);
         file >> params;
     } else if(!strcmp(argv[1], "run")){
         printf("Loading params.json. \n");
@@ -328,13 +330,13 @@ int main(int argc, char *argv[])
                             cell_end,
                             N, num_blocks, threads_per_block);
 
-            // Update non-bonded forces
-            ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
-                       cell_start, cell_end, forces_x, num_neighbors,
-                       N, num_blocks, threads_per_block,
-                       ds, rep, A, lambda, shiftrep, expn, gammam, 1);
-
         }
+
+        // Update non-bonded forces
+        ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
+                    cell_start, cell_end, forces_x, num_neighbors,
+                    N, num_blocks, threads_per_block,
+                    ds, rep, A, lambda, shiftrep, expn, gammam, 1);
 
         //Update elastic forces between two consecutive particles: first need to resort array
         elastic_force<<<num_blocks, threads_per_block>>>(
@@ -386,7 +388,7 @@ int main(int argc, char *argv[])
     else{
         printf("Current time is %f. Equilibrating polymer with constant field...\n", t_current);
         //Initialize epigentic field to certain average
-        InitEpiAvg<<<num_blocks, threads_per_block>>>(thrust::raw_pointer_cast(positions.data()), N, init_epi_value);
+        InitEpiAvg<<<num_blocks, threads_per_block>>>(thrust::raw_pointer_cast(positions.data()), N, init_epi_value, thrust::raw_pointer_cast(chain_indices.data()));
     }
     
 
@@ -427,13 +429,14 @@ int main(int argc, char *argv[])
                             cell_end,
                             N, num_blocks, threads_per_block);
 
-            // Update non-bonded forces
-            ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
-                       cell_start, cell_end, forces_x, num_neighbors,
-                       N, num_blocks, threads_per_block,
-                       ds, rep, A, lambda, shiftrep, expn, 4.0, 0); //Equilibrate collapse at low gamma to allow for contact changes
 
         }
+
+        // Update non-bonded forces
+        ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
+                    cell_start, cell_end, forces_x, num_neighbors,
+                    N, num_blocks, threads_per_block,
+                    ds, rep, A, lambda, shiftrep, expn, 4.0, 0); //Equilibrate collapse at low gamma to allow for contact changes
 
         //Update elastic forces between two consecutive particles: first need to resort array
         elastic_force<<<num_blocks, threads_per_block>>>(
@@ -448,6 +451,13 @@ int main(int argc, char *argv[])
         dt_adaptive = calculate_dt_adaptive(thrust::raw_pointer_cast(forces.data()),
                     thrust::raw_pointer_cast(elasticforces.data()),
                     N, dx_thresh, dt);
+
+    
+        // float max_force = sqrtf(ComputeMaxForceSqThrust(
+        // thrust::raw_pointer_cast(forces.data()),
+        // thrust::raw_pointer_cast(elasticforces.data()),
+        // N));
+        // printf("Maximum force is %f \n.", max_force);
         
 
         t_current += dt_adaptive;
@@ -529,14 +539,14 @@ int main(int argc, char *argv[])
                             cell_end,
                             N, num_blocks, threads_per_block);
 
-            // Update non-bonded forces
-            ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
-                       cell_start, cell_end, forces_x, num_neighbors,
-                       N, num_blocks, threads_per_block,
-                       ds, rep, A, lambda, shiftrep, expn, gammam, 0);
-
         }
 
+        // Update non-bonded forces
+        ComputeNonBondedForces(positions, forces, chain_indices, particle_hashes,
+                    cell_start, cell_end, forces_x, num_neighbors,
+                    N, num_blocks, threads_per_block,
+                    ds, rep, A, lambda, shiftrep, expn, gammam, 0);
+                    
         //Update elastic forces between two consecutive particles: first need to resort array
         elastic_force<<<num_blocks, threads_per_block>>>(
             thrust::raw_pointer_cast(positions.data()),
@@ -550,6 +560,13 @@ int main(int argc, char *argv[])
         dt_adaptive = calculate_dt_adaptive(thrust::raw_pointer_cast(forces.data()),
                     thrust::raw_pointer_cast(elasticforces.data()),
                     N, dx_thresh, dt);
+
+        
+        // float max_force = sqrtf(ComputeMaxForceSqThrust(
+        // thrust::raw_pointer_cast(forces.data()),
+        // thrust::raw_pointer_cast(elasticforces.data()),
+        // N));
+        // printf("Maximum force is %f. Timestep is %f. \n", max_force, dt_adaptive);
 
         t_current += dt_adaptive;
 
